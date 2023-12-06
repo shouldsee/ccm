@@ -27,8 +27,12 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+import sys
+
 from model import GPTConfig, GPT
 
+
+print(f'[pid] {os.getpid()}')
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -71,11 +75,20 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-compile = True # use PyTorch 2.0 to compile the model to be faster
+
+# compile = True # use PyTorch 2.0 to compile the model to be faster
+# is_dynamic= False
+
+compile = False # use PyTorch 2.0 to compile the model to be faster
+is_dynamic= True
+
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
+
+out_dir = f'{out_dir}-{GPT.__name__}'
+
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -152,6 +165,7 @@ if init_from == 'scratch':
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
+    # breakpoint()
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -183,10 +197,14 @@ elif init_from.startswith('gpt2'):
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
-# crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
-    model.crop_block_size(block_size)
-    model_args['block_size'] = block_size # so that the checkpoint will have the right value
+
+
+###### do not crop
+# # crop down the model block size if desired, using model surgery
+# if block_size < model.config.block_size:
+#     model.crop_block_size(block_size)
+#     model_args['block_size'] = block_size # so that the checkpoint will have the right value
+
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -198,11 +216,13 @@ if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
+
 # compile the model
 if compile:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
-    model = torch.compile(model) # requires PyTorch 2.0
+    # model = torch.compile(model) # requires PyTorch 2.0
+    model = torch.compile(model,dynamic=is_dynamic) # requires PyTorch 2.0
 
 # wrap model into DDP container
 if ddp:
@@ -218,7 +238,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, _, loss  = model(X, Y, gradient_only = False)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -294,7 +314,7 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss, loss_eval = model(X, Y, gradient_only = True)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
@@ -321,7 +341,7 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        print(f"iter {iter_num}: loss {lossf:.4f}, loss_eval:{loss_eval.item():.4f}  time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1
     local_iter_num += 1
 

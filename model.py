@@ -131,8 +131,19 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     share_kv: bool= False
-
+    optimizer:str='adamw'
+    method: int = -1
+    
 class GPT_01(nn.Module):
+    @classmethod
+    def add_config(cls, config):
+        config.suffix=""
+        return 
+
+    @classmethod
+    def get_out_dir(cls, out_dir,config):
+        cls.add_config(config)
+        return f'{out_dir}-{cls.__name__}-{config.suffix}'        
 
     def __init__(self, config):
         super().__init__()
@@ -973,13 +984,26 @@ class GPT_08(GPT_01):
     better estimator to sample from posterior
     '''
 
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.method = 5
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        assert config.method in [5,6,7]
+        return config
+
 
     def __init__(self, config):
         super(GPT_01,self).__init__()
+
+        config = self.add_config(config)
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        self.config.mask_index = -1
+        print(config)
+        # breakpoint()
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -1021,28 +1045,43 @@ class GPT_08(GPT_01):
 
         lp_total   = lp_external.sum(1) + lp_internal
         # method = 6
-        method = 5
+        method = self.config.method
         
 
         lp_total = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
 
-        ### sampling from posterior is difficult https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
         
         # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
-        loss_valid = -(lp_total.sum(-1).logsumexp(0))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
         if 0:
             pass
         elif method == 5:
             ### equally weighted sample from p(z|h)
-            loss_grad  = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+            # loss_grad  = -(lp_total.logsumexp(0) - math.log(ns))/ct.sum(0)
+            loss_grad  = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
         elif method == 6:
             ### re weighted sample from p(z|h)
             ##(ns,b)
-            lp_total_sum = lp_total.sum(-1)
-            reweight_lp  = lp_total_sum + lp_total_sum.log_softmax(0)
-            loss_grad  = -(reweight_lp.logsumexp(0))/ct.sum(0)
+            # lp_total_sum = lp_total.sum(-1)
+            reweight_lp  = lp_total + lp_total.log_softmax(0)
+            loss_grad    = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
             pass
             # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+        elif method == 7:
+            ### re weighted sample using q()
+            ##(ns,b)
+            # lp_external = 
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp
+            loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            pass
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+
         else:
             assert 0
 
@@ -1086,10 +1125,43 @@ class GPT_08(GPT_01):
 
 
 
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        # start with all of the candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        # breakpoint()
+        if self.config.optimizer =='rmsprop':
+            optimizer = torch.optim.RMSprop(optim_groups, lr=learning_rate)
+            print(f"using optimizer:{optimizer!r}")
+        elif self.config.optimizer=='adamw':
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            print(f"using fused AdamW: {use_fused}")
+        else:
+            raise Exception(self.config.optimiser)
+
+        return optimizer
 
 
 
 class GPT_GRU(GPT_01):
+
 
 
     def __init__(self, config):

@@ -10,6 +10,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 import math
 import inspect
 from dataclasses import dataclass
+import random
 
 import torch
 import torch.nn as nn
@@ -47,12 +48,14 @@ class CausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         self.flash = False
- 
+        self.is_causal = config.is_causal
+        self.use_dropout = config.use_dropout
+        nrep = getattr(config,'nrep', 1)
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size*nrep, config.block_size*nrep))
+                                        .view(1, 1, config.block_size*nrep, config.block_size*nrep))
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -60,6 +63,7 @@ class CausalSelfAttention(nn.Module):
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
 
+        ### lower rank matrix for the internal representation
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -72,20 +76,24 @@ class CausalSelfAttention(nn.Module):
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, 
             dropout_p=self.dropout if self.training else 0, 
-            is_causal=True)
+            is_causal=self.is_causal)
         else:
             # assert 0
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            if self.is_causal:
+                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             # att = F.softmax(att, dim=-1)
-            att = F.softmax(att*100, dim=-1)
-            att = self.attn_dropout(att)
+            att = F.softmax(att, dim=-1)
+            if self.use_dropout:
+                att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
-        y = self.resid_dropout(self.c_proj(y))
+        y = self.c_proj(y)
+        if self.use_dropout:
+            y = self.resid_dropout(y)
         return y
 
 
@@ -121,6 +129,113 @@ class Block(nn.Module):
         return x
 
 
+class Block13(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention13(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        # x = x + self.mlp(self.ln_2(x))
+        return x
+
+
+
+class CausalSelfAttention13(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        # assert 0
+        assert config.n_embd % config.n_head == 0
+        # self.config.
+        self.share_kv = config.share_kv
+        # self.share_kv  = 1
+        self.share_kv  = 1
+        # if self.share_kv:
+        #     self.c_attn_q = nn.Parameter(nn.Linear(config.n_embd, config.n_embd, bias=config.bias).weight)
+        #     self.c_attn_k = nn.Parameter(nn.Linear(config.n_embd, config.n_embd, bias=config.bias).weight)
+        #     self.c_attn_v = nn.Parameter(nn.Linear(config.n_embd, config.n_embd, bias=config.bias).weight)
+        # else:
+
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn_q = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_attn_k = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_attn_v = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # self.c_attn = nn.Linear(config.n_embd, 3*config.n_embd, bias=config.bias)
+    
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # regularization
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = False
+        self.is_causal = config.is_causal
+        self.use_dropout = config.use_dropout
+        nrep = getattr(config,'nrep', 1)
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size*nrep, config.block_size*nrep))
+                                        .view(1, 1, config.block_size*nrep, config.block_size*nrep))
+
+    def forward(self, x):
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        # q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        
+        if self.share_kv:
+
+            q = x.matmul(self.c_attn_q.weight)
+            k = x.matmul(self.c_attn_k.weight)
+            v = k.matmul(self.c_attn_q.weight.T)
+            # v = k.matmul(self.c_attn_v)
+        else:
+            q = self.c_attn_q(x)
+            k = self.c_attn_k(x)
+            v = self.c_attn_v(x)
+        
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        # if self.share_kv:
+        #     v = k
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        if self.flash:
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, 
+            dropout_p=self.dropout if self.training else 0, 
+            is_causal=self.is_causal)
+        else:
+            # manual implementation of attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            if self.is_causal:
+                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            # att = F.softmax(att, dim=-1)
+            att = F.softmax(att, dim=-1)
+            if self.use_dropout:
+                att = self.attn_dropout(att)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+        # output projection
+        if not self.share_kv:
+            y = self.c_proj(y)
+
+        if self.use_dropout:
+            y = self.resid_dropout(y)
+        return y
+
 @dataclass
 class GPTConfig:
     block_size: int = 1024
@@ -133,6 +248,8 @@ class GPTConfig:
     share_kv: bool= False
     optimizer:str='adamw'
     method: int = -1
+    is_causal: int = 1
+    use_dropout:int = 1
     
 class GPT_01(nn.Module):
     @classmethod
@@ -218,7 +335,7 @@ class GPT_01(nn.Module):
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
-        return logits, loss
+        return logits, loss, loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -309,10 +426,18 @@ class GPT_01(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        # breakpoint()
+        if self.config.optimizer =='rmsprop':
+            optimizer = torch.optim.RMSprop(optim_groups, lr=learning_rate)
+            print(f"using optimizer:{optimizer!r}")
+        elif self.config.optimizer=='adamw':
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            print(f"using fused AdamW: {use_fused}")
+        else:
+            raise Exception(self.config.optimizer)
 
         return optimizer
+
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
@@ -340,8 +465,10 @@ class GPT_01(nn.Module):
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+
+            # breakpoint()
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
@@ -784,6 +911,7 @@ class SamplingCausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         # self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         self.flash = False
+        self.use_dropout = config.use_dropout
  
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
@@ -837,7 +965,9 @@ class SamplingCausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
-        y = self.resid_dropout(self.c_proj(y))
+        y = self.c_proj(y)
+        if self.use_dropout:
+            y = self.resid_dropout(y)
         return y,lp
 
 
@@ -988,10 +1118,12 @@ class GPT_08(GPT_01):
     def add_config(cls, config):
         config.mask_index = -1
         # config.optimizer ='rmsprop'
-        config.optimizer ='adamw'
+        # config.optimizer ='adamw'
         # config.method = 5
+        config.use_dropout = 0
         config.suffix = f'{config.optimizer}-method{config.method}'
-        assert config.method in [5,6,7]
+        assert config.method in [5,6,7,8,9]
+        assert config.optimizer
         return config
 
 
@@ -1031,14 +1163,19 @@ class GPT_08(GPT_01):
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     def forward(self, idx, targets=None, gradient_only=True):
-        target_not_null = targets != self.config.mask_index 
-        ct = target_not_null.sum(1)
-
         device = idx.device
         b, t = idx.size()
-        ns = 5
+        # ns = 15
+        ns = 6
         idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
-        targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
 
         (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
 
@@ -1046,9 +1183,10 @@ class GPT_08(GPT_01):
         lp_total   = lp_external.sum(1) + lp_internal
         # method = 6
         method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
         
-
-        lp_total = lp_total.reshape((ns,b,))
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
         lp_external = lp_external.reshape((ns,b,t))   
 
         ### sampling from posterior is difficult
@@ -1082,8 +1220,43 @@ class GPT_08(GPT_01):
             pass
             # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
 
+        elif method == 8:
+            ### re weighted sample using q()
+            ##(ns,b)
+            # lp_external = 
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            # loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            pass
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+
+        elif method == 9:
+            ### re weighted sample using q()
+            ##(ns,b)
+            # lp_external = 
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            pass
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
         else:
             assert 0
+        ### (b,v)
+        # breakpoint()
+        # print(logits.shape)
+        logits0 = logits
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+        # breakpoint()
+        # if logits.shape.__len__()==2:
+        #     logits = logits[:,None]
+        # breakpoint()
+
 
 
 
@@ -1101,7 +1274,10 @@ class GPT_08(GPT_01):
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        # x = self.transformer.drop(tok_emb + pos_emb)
+        x = tok_emb + pos_emb
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
 
         target_not_null = targets != self.config.mask_index 
 
@@ -1119,49 +1295,1681 @@ class GPT_08(GPT_01):
         logits = self.lm_head(x)
         # loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         ### (b,t)
-        lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        if targets is not None:
+            lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        else:
+            lp_external = torch.zeros_like(logits[:,:,0])
         # ct = target_not_null.sum(1)
         return logits, lp_internal,lp_external
 
 
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        # breakpoint()
-        if self.config.optimizer =='rmsprop':
-            optimizer = torch.optim.RMSprop(optim_groups, lr=learning_rate)
-            print(f"using optimizer:{optimizer!r}")
-        elif self.config.optimizer=='adamw':
-            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-            print(f"using fused AdamW: {use_fused}")
-        else:
-            raise Exception(self.config.optimiser)
 
-        return optimizer
+
+
+
+
+class GPT_09(GPT_01):
+    '''
+    compress the internal representation to discrete representations
+    g200 
+iter 240: loss 7.9497, loss_eval:7.9357  time 702.09ms, mfu 1.02%
+step 250: train loss 7.9466, val loss 8.0475
+iter 490: loss 7.6413, loss_eval:7.6197  time 731.53ms, mfu 1.00%
+step 500: train loss 7.7671, val loss 7.9329
+
+step 250: train loss 7.5792, val loss 7.7099
+iter 490: loss 7.4772, loss_eval:7.4628  time 714.63ms, mfu 1.01%
+step 500: train loss 7.5697, val loss 7.7299
+
+step 1000: train loss 7.7695, val loss 7.9453
+
+method0,g200
+iter 240: loss 7.8003, loss_eval:7.7760  time 727.53ms, mfu 1.02%
+step 250: train loss 7.7858, val loss 7.9133
+iter 490: loss 7.6439, loss_eval:7.6230  time 713.47ms, mfu 1.00%
+step 500: train loss 7.7632, val loss 7.9285
+
+
+method9,g200
+iter 240: loss 6.3232, loss_eval:7.7767  time 714.52ms, mfu 1.02%
+step 250: train loss 7.7861, val loss 7.9164
+iter 490: loss 6.1698, loss_eval:7.6274  time 712.11ms, mfu 1.01%
+ step 500: train loss 7.7606, val loss 7.9289
+
+method10,g200
+iter 240: loss 4.8718, loss_eval:7.7997  time 726.34ms, mfu 1.02%
+step 250: train loss 7.7960, val loss 7.9173
+iter 490: loss 4.6816, loss_eval:7.6239  time 688.22ms, mfu 1.01%
+step 500: train loss 7.7682, val loss 7.9183
+
+
+method10,g50
+iter 240: loss 5.2655, loss_eval:7.6712  time 725.48ms, mfu 1.02%
+step 250: train loss 7.7201, val loss 7.7941
+iter 490: loss 4.9916, loss_eval:7.4936  time 726.84ms, mfu 1.00%
+step 500: train loss 7.5804, val loss 7.7097
+
+method10,g50
+iter 240: loss 5.3594, loss_eval:7.7166  time 717.04ms, mfu 1.02%
+step 250: train loss 7.6947, val loss 7.7751
+iter 490: loss 4.9512, loss_eval:7.4518  time 730.31ms, mfu 1.00%
+step 500: train loss 7.5686, val loss 7.7386
+
+
+
+
+method11,g50
+iter 240: loss 6.4530, loss_eval:7.6488  time 710.61ms, mfu 1.01%
+step 250: train loss 7.6761, val loss 7.7710
+
+
+method11,g50
+iter 240: loss 6.5146, loss_eval:7.6650  time 716.95ms, mfu 1.02%
+step 250: train loss 7.6280, val loss 7.7259
+
+method12,g50
+iter 240: loss 5.8304, loss_eval:7.6571  time 716.91ms, mfu 1.01%
+step 250: train loss 7.6177, val loss 7.7205
+iter 490: loss 5.6404, loss_eval:7.4676  time 719.60ms, mfu 1.01%
+step 500: train loss 7.5693, val loss 7.7210
+
+method12,g200
+iter 240: loss 5.6181, loss_eval:7.8786  time 710.15ms, mfu 1.01%
+step 250: train loss 7.8585, val loss 7.9670
+iter 490: loss 5.3650, loss_eval:7.6248  time 723.61ms, mfu 1.00%
+step 500: train loss 7.7636, val loss 7.9249
+iter 740: loss 5.4536, loss_eval:7.7338  time 732.31ms, mfu 1.00%
+step 750: train loss 7.7872, val loss 7.9550
+iter 990: loss 5.4332, loss_eval:7.7669  time 722.89ms, mfu 1.01%
+step 1000: train loss 7.7685, val loss 7.9637
+iter 1240: loss 5.2694, loss_eval:7.5897  time 726.83ms, mfu 1.00%
+step 1250: train loss 7.7734, val loss 7.9823
+
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        config.k = 15
+        config.g = 50
+        # config.g = 20 0
+        # config.method = 8
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=False
+        config.n_layer= 1
+        assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT_01,self).__init__()
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            k_query = nn.Linear(config.n_embd,config.k, ),
+            g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h_dec = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        ns = 5
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_k
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ### re weighted sample using q()
+        ##(ns,b)
+
+        #### need to reweight with
+        if method==8:
+            reweight_lp  = (lp_external.sum(2) - lp_internal).log_softmax(0) 
+            reweight_lp  = lp_total + reweight_lp
+            loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+        elif method==9:
+            ### adding p(c)p(x|c)q(c|x)
+            # lp_raw = lp_external.sum(-1) + (1+ lp_internal.exp()).log() 
+            lp_raw = lp_external.sum(-1) + F.softplus(lp_internal)
+            reweight_lp  = (lp_raw - lp_internal).log_softmax(0) 
+            reweight_lp  = lp_raw + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            pass
+        elif method==10:
+            ### lp_k
+            ### p(c)p(x|c) +  p(x|c)q(c|x)
+            lp_raw = lp_external.sum(-1) +  F.softplus(lp_internal - lp_k)
+            reweight_lp  = (lp_raw - lp_internal).log_softmax(0) 
+            reweight_lp  = lp_raw + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            pass 
+        elif method==11:
+            ### using only p(x|c)q(c|x)
+            ### lp_k
+            lp_raw = lp_external.sum(-1) +  lp_internal
+            reweight_lp  = lp_external.sum(-1).log_softmax(0) 
+            reweight_lp  = lp_raw + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            pass 
+
+        elif method==12:
+            ### p(c)p(x|c) +  p(x|c)q(c|x)  fitting both generative loss and autoencoder loss
+            ### using average of log
+            lp_raw = lp_external.sum(-1) +  F.softplus(lp_internal - lp_k)
+            reweight_lp  = (lp_raw - lp_internal).log_softmax(0) 
+            reweight_lp  = lp_raw + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            pass 
+        elif method==13:
+            ### p(c)p(x|c) +  p(x|c)q(c|x)  fitting both generative loss and autoencoder loss
+            ### using average of log
+            # lp_raw = lp_external.sum(-1) +  F.softplus(lp_internal - lp_k)
+            # reweight_lp  = (lp_raw - lp_internal).log_softmax(0) 
+            # reweight_lp  = lp_raw + reweight_lp.detach()
+            # loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # pass 
+            loss_grad = loss_valid
+        else:
+            assert 0
+        # pass
+        # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+
+        logits0 = logits
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+
+        return logits, loss_grad, loss_valid
+
+
+    def _forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = self.transformer.drop(tok_emb + pos_emb)
+
+        target_not_null = targets != self.config.mask_index 
+
+        for block in self.transformer.h_enc:
+            x     = block(x) 
+            x     = self.transformer.ln_f(x)
+
+    
+        # (b, t, n_embd)
+        # x = self.transformer.ln_f(x)
+
+        ### encode the distributed vectors into discrete representations
+        ### for each of k component
+        ### find the vector that best match the prototype, record p_k .
+        ### then find the best matching vector from the vector database 
+        ### and record the index g_k
+        k        = self.config.k
+        k_query  = md.k_query ### (k, n_embed)
+        g_vects  = self.transformer.ln_f(md.g_vects.weight) ### (g, n_embed)        
+
+        ### (b,k,t)
+        pk_dist = torch.distributions.Categorical(logits=k_query(x-pos_emb).transpose(1,2))
+        pk      = pk_dist.sample()
+
+        ### (b, k, ne)
+        idx_b   = torch.arange(b,device=device)[:,None].expand(b,k)
+        vk      = (x-pos_emb)[idx_b, pk, :]
+        
+        ### (b, k,  g)
+        gk_dist = torch.distributions.Categorical(logits = vk.matmul( g_vects.T )/self.config.n_embd**0.5)
+        gk      = gk_dist.sample() 
+
+        ### lp_internal  (b, )
+        lp_internal = (pk_dist.log_prob(pk) + gk_dist.log_prob(gk)).sum(-1)
+
+        ### pk           (b, k)
+        ### gk           (b, k)
+
+        # n_embd  = self.config.n_embd
+        # x_recon = torch.zeros((b,t,n_embd),device=device)
+        # print(pos_emb.shape)
+        # print(pk[0:2])
+        # print(gk[0:2])
+        # .sum(0))
+
+        x_recon = pos_emb[None].repeat((b,1,1))
+        x_recon[:,pk,:] = x_recon[:,pk,:] + g_vects[gk,:]
+
+        ### then given p_k and g_k, reconstruct the representation 
+        ### by putting the vector to the corresponding position
+
+        x = x_recon
+        for block in self.transformer.h_dec:
+        # for block in self.transformer.h_enc[::-1]:
+            x     = block(x) 
+            x     = self.transformer.ln_f(x)
+        # # x     = self.transformer.ln_f(x)
+
+        logits = self.lm_head(x - pos_emb[None].repeat((b,1,1)))
+
+        ### (b,t)
+        if targets is not None:
+            lp_external  = -F.cross_entropy(logits.transpose(1,2), idx, ignore_index=self.config.mask_index,reduction='none')
+        else:
+            lp_external = torch.zeros_like(logits[:,:,0])
+        # ct = target_not_null.sum(1)
+        return logits, lp_internal,lp_external
+
+
+class GPT_10(GPT_01):
+    '''
+    compress the internal representation to discrete representations
+    g200 
+iter 240: loss 7.9497, loss_eval:7.9357  time 702.09ms, mfu 1.02%
+step 250: train loss 7.9466, val loss 8.0475
+
+
+layer1,k5,g200
+iter 240: loss 6.4848, loss_eval:6.4761  time 514.69ms, mfu 0.81%
+step 250: train loss 6.3367, val loss 6.4752
+
+iter 490: loss 2.5496, loss_eval:2.5452  time 510.20ms, mfu 0.80%
+step 500: train loss 1.9330, val loss 2.1382
+
+
+layer1,k2,g2
+iter 240: loss 6.0271, loss_eval:6.0157  time 496.76ms, mfu 0.82%
+step 250: train loss 5.6433, val loss 5.8436
+iter 490: loss 1.7409, loss_eval:1.7320  time 481.57ms, mfu 0.82%
+step 500: train loss 1.1680, val loss 1.3470
+
+
+
+additive
+step 500: train loss 5.4136, val loss 5.8899
+iter 500: loss 5.5735, loss_eval:5.3794  time 11853.54ms, mfu -100.00%
+iter 510: loss 5.8282, loss_eval:5.5868  time 620.74ms, mfu 1.17%
+iter 490: loss 5.9515, loss_eval:5.7734  time 556.78ms, mfu 1.19%
+step 500: train loss 5.4961, val loss 5.9659
+iter 740: loss 5.8171, loss_eval:5.5836  time 634.95ms, mfu 1.19%
+step 750: train loss 5.1832, val loss 5.7880
+iter 990: loss 5.2952, loss_eval:5.0550  time 597.41ms, mfu 1.17%
+step 1000: train loss 4.7811, val loss 5.5304
+iter 2240: loss 4.7365, loss_eval:4.5003  time 566.07ms, mfu 1.17%
+step 2250: train loss 4.1148, val loss 5.7818
+
+
+extract
+iter 240: loss 5.8068, loss_eval:5.6415  time 633.79ms, mfu 1.18%
+step 250: train loss 5.6000, val loss 5.8979
+iter 490: loss 5.4432, loss_eval:5.2642  time 557.39ms, mfu 1.20%
+step 500: train loss 5.0229, val loss 5.5521
+iter 740: loss 5.2986, loss_eval:5.0846  time 576.89ms, mfu 1.22%
+step 750: train loss 4.6732, val loss 5.3812
+iter 2240: loss 4.3540, loss_eval:4.0936  time 610.82ms, mfu 1.19%
+step 2250: train loss 3.7010, val loss 5.4492
+iter 2490: loss 4.4014, loss_eval:4.1881  time 625.22ms, mfu 1.17%
+step 2500: train loss 3.6815, val loss 5.5955
+
+extract g200
+iter 1740: loss 4.8787, loss_eval:4.5646  time 1088.49ms, mfu 0.85%
+ step 1750: train loss 4.3611, val loss 5.7227
+
+
+### maybe overfitting?
+
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+
+        # config.k = 2
+        # config.g = 2
+
+        # config.n_layer= 1
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT_01,self).__init__()
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            k_query = nn.Linear(config.n_embd,config.n_embd, ),
+            k_vects = nn.Embedding(config.g, config.n_embd),
+            g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h_dec = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        ns = 5
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_internal
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ##(ns,b)        
+        if 0:
+            pass
+        elif method in (8,10):
+            ### re weighted sample using q()
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            # loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+        elif method == 12:
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+            reweight_lp  = lp_total + reweight_lp.detach()
+            loss_grad    = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+        else:
+            assert 0
+        ### (b,v)
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+        return logits, loss_grad, loss_valid
+
+
+    def _forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+        k        = self.config.k
+        k_query  = md.k_query ### (k, n_embed)
+        g_vects  = self.transformer.ln_f(md.g_vects.weight) ### (g, n_embed)        
+        k_vects  = self.transformer.ln_f(md.k_vects.weight) ### (g, n_embed)        
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+        target_not_null = targets != self.config.mask_index 
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+        if self.config.method==8:
+            for i,block in enumerate(self.transformer.h_dec):
+                # if i==5:
+                if i==4:
+                        ## (b, t, e)
+                        xk = md.ln_f(k_query(x))
+                        ### (b, t, g)
+                        logits  = xk.matmul( g_vects.T )/self.config.n_embd**0.5
+                        gk_dist = torch.distributions.Categorical(logits = logits )
+                        ### (b, t)
+                        gk      = gk_dist.sample() 
+                        # breakpoint()
+                        ### (b, t, e)
+                        # breakpoint()
+                        gv      = g_vects[gk,:]
+                        xx      = torch.cat([gv[:,:,None],x[:,:,None]],dim=2)
+                        xx = xx.reshape((b,2*t,e))
+
+                        xx     = block(xx)
+                        
+                        xx     = xx.reshape((b,t,2,e))[:,:,-1]
+                    #     x     = x[:,k:] 
+                        x      = self.transformer.ln_f(xx)
+                        lp_internal += (gk_dist.log_prob(gk)).sum(-1)
+
+                        # print(gk[0:2].float().std().item())
+                        # print(gk[0:2].float().mean().item())
+
+
+                    # #### additive
+                    # ### (b, t, e)
+                    # # xk = md.ln_f(k_query(x-pos_emb))
+                    # ### (b, t, g)
+                    # logits  = x.matmul( k_vects.T )/self.config.n_embd**0.5
+                    # gk_dist = torch.distributions.Categorical(logits = logits )
+                    # ### (b, t)
+                    # gk      = gk_dist.sample() 
+                    # # breakpoint()
+                    # ### (b, t, e)
+                    # # breakpoint()
+                    # gv      = g_vects[gk,:]
+                    # # xx      = torch.cat([gv[:,:,None],x[:,:,None]],dim=2)
+                    # # xx      = xx.reshape((b,2*t,e))
+                    # xx     = x
+                    # xx     = (block(xx) + gv)*0.5
+                    
+                    # # xx     = xx.reshape((b,t,2,e))[:,:,-1]
+                    # x      = self.transformer.ln_f(xx)
+                    # lp_internal += (gk_dist.log_prob(gk)).sum(-1)
+
+                    # # print(gk[0:2].float().std().item())
+                    # # pass                    
+
+                else:
+                    x     = block(x)
+                    # x     = x[:,k:] 
+                    x     = self.transformer.ln_f(x)            
+
+                # if i==5:
+                #     # print(gk[0:2])
+                #     pass
+        else:
+    
+            ### interleaving the context vector with token vector
+            ### accessing the vector db 
+            ### (b,t,2,e)
+
+
+            for block in self.transformer.h_dec:
+                x     = block(x)
+                # x     = x[:,k:] 
+                x     = self.transformer.ln_f(x)            
+
+
+        #### lets extract some vector from vector database
+
+        # (b, t, n_embd)
+
+        ### encode the distributed vectors into discrete representations
+        ### for each of k component
+        ### find the vector that best match the prototype, record p_k .
+        ### then find the best matching vector from the vector database 
+        ### and record the index g_k
+
+
+        ### pk           (b, k)
+        ### gk           (b, k)
+
+        # n_embd  = self.config.n_embd
+        # x_recon = torch.zeros((b,t,n_embd),device=device)
+        # print(pk[0:2])
+        # print(gk[0:2])
+
+
+        # logits = self.lm_head(x - pos_emb[None].repeat((b,1,1)))
+        # logits = self.lm_head(x - pos_emb[None].repeat((b,1,1)))
+        # x = self.transformer.ln_f((x - pos_emb[None].repeat((b,1,1))))
+        logits = self.lm_head(x)
+
+        ### (b,t)
+        if targets is not None:
+            lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        else:
+            lp_external = torch.zeros_like(logits[:,:,0])
+        # ct = target_not_null.sum(1)
+        return logits, lp_internal,lp_external
+
+
+
+
+class GPT_11(GPT_01):
+    '''
+    compress the internal representation to discrete representations
+    g200 
+
+
+### maybe overfitting?
+
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT_01,self).__init__()
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            k_query = nn.Linear(config.n_embd,config.n_embd, ),
+            k_vects = nn.Embedding(config.g, config.n_embd),
+            g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h_dec = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        ns = 1
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_internal
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ##(ns,b)        
+        if 0:
+            pass
+        elif method in (8,10):
+            ### re weighted sample using q()
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            # loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+        elif method == 12:
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+            reweight_lp  = lp_total + reweight_lp.detach()
+            loss_grad    = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+        else:
+            assert 0
+        ### (b,v)
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+        return logits, loss_grad, loss_valid
+
+
+    def _forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+        k        = self.config.k
+        k_query  = md.k_query ### (k, n_embed)
+        g_vects  = self.transformer.ln_f(md.g_vects.weight) ### (g, n_embed)        
+        k_vects  = self.transformer.ln_f(md.k_vects.weight) ### (g, n_embed)        
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+        target_not_null = targets != self.config.mask_index 
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+        '''
+        ### pos enc + / residual +
+        step 250: train loss 5.6127, val loss 5.8632
+        step 500: train loss 4.9467, val loss 5.3748
+        step 750: train loss 4.5654, val loss 5.1806
+        step 1000: train loss 4.2439, val loss 5.0947
+
+        ### pos enc - / residual + 0.5
+        step 250: train loss 5.4925, val loss 5.8086
+        step 500: train loss 4.8301, val loss 5.3399
+        step 750: train loss 4.4383, val loss 5.1964
+
+        ### pos enc - / residual -
+        step 250: train loss 4.8621, val loss 5.3303
+        step 500: train loss 4.2734, val loss 4.9331
+        step 750: train loss 3.9459, val loss 4.9137
+
+
+        ### pos enc - / residual + 0.8
+
+
+        ### pos enc + / residual -
+        step 250: train loss 4.9676, val loss 5.3853
+
+
+        ### pos enc + / residual - / middle_layer_norm -
+        step 250: train loss 5.0719, val loss 5.4513
+        step 500: train loss 4.3034, val loss 4.8873
+        step 750: train loss 3.9363, val loss 4.7851
+
+
+        ### pos enc + / residual - / middle_layer_norm - / remove_pos_emb
+        step 250: train loss 5.0620, val loss 5.4487
+        step 500: train loss 4.2928, val loss 4.8785
+        step 750: train loss 3.9345, val loss 4.7823
+
+
+        ### pos enc + / residual0.8 / middle_layer_norm - / remove_pos_emb
+        step 250: train loss 5.1025, val loss 5.4564
+        step 500: train loss 4.3291, val loss 4.8816
+        step 750: train loss 3.9590, val loss 4.7685
+        step 1000: train loss 3.6484, val loss 4.7441
+        step 1250: train loss 3.3402, val loss 4.8668
+
+
+        ### pos enc -/ residual0.8 / middle_layer_norm - / 
+        step 250: train loss 5.0334, val loss 5.4276
+        step 500: train loss 4.2829, val loss 4.8840
+        step 750: train loss 3.9195, val loss 4.8110
+        step 1000: train loss 3.6188, val loss 4.8142
+        step 1250: train loss 3.3348, val loss 4.9116
+
+
+
+        ### pos enc -/ residual -  / middle_layer_norm - / 
+        step 250: train loss 4.9824, val loss 5.4127
+        step 500: train loss 4.2946, val loss 4.9320
+        step 750: train loss 3.9480, val loss 4.8661
+
+
+
+
+
+        ''' 
+
+        # block0 = self.transformer.h_dec[0]
+        for i in range(3):
+            # enumerate(self.transformer.h_dec):
+            # if i==5:
+            # random.ch
+            # block0 = random.choice(self.transformer.h_dec)
+            x0    = x[:,:-1]
+            dx = 0. 
+            for ii,block in enumerate(self.transformer.h_dec):
+                dx     += block(x)
+            x = dx / (ii+1)
+
+            # x[:,1:] = 0.2 * x0 + 0.8*x[:,1:]
+            # x     = self.transformer.ln_f(x)            
+        x = x- pos_emb
+        x     = self.transformer.ln_f(x)            
+
+
+        logits = self.lm_head(x)
+
+        ### (b,t)
+        if targets is not None:
+            lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        else:
+            lp_external = torch.zeros_like(logits[:,:,0])
+        # ct = target_not_null.sum(1)
+        return logits, lp_internal,lp_external        
+
+class GPT_13(GPT_01):
+    '''
+    compress the internal representation to discrete representations
+    g200 
+
+
+### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT_01,self).__init__()
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            # k_query = nn.Linear(config.n_embd,config.n_embd, ),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h_enc = nn.ModuleList([Block13(config) for _ in range(config.n_layer)]),
+            h_dec = nn.ModuleList([Block13(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        ns = 1
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_internal
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ##(ns,b)        
+        if 0:
+            pass
+        elif method in (8,10,12):
+            ### re weighted sample using q()
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            # loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+        else:
+            assert 0
+        ### (b,v)
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+        return logits, loss_grad, loss_valid
+
+
+    def _forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+        target_not_null = targets != self.config.mask_index 
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+        '''
+        ### pos enc + / residual - / middle_layer_norm - / remove_pos_emb
+        step 250: train loss 5.0620, val loss 5.4487
+        step 500: train loss 4.2928, val loss 4.8785
+        step 750: train loss 3.9345, val loss 4.7823
+
+
+        ###
+        iter 240: loss 5.3922, loss_eval:5.3922  time 466.20ms, mfu 1.56%
+        step 250: train loss 5.3472, val loss 5.6183
+        step 500: train loss 4.4483, val loss 4.9606
+        step 750: train loss 4.0301, val loss 4.8203
+        step 1000: train loss 3.7105, val loss 4.8578
+
+
+### GPT_13 performs good without v matrix
+iter 480: loss 5.2782, loss_eval:5.2782  time 397.97ms, mfu 1.82%
+iter 490: loss 5.1611, loss_eval:5.1611  time 396.14ms, mfu 1.82%
+step 500: train loss 5.3144, val loss 5.5583
+
+
+
+iter 720: loss 4.8826, loss_eval:4.8826  time 408.22ms, mfu 1.79%
+iter 730: loss 4.9931, loss_eval:4.9931  time 417.93ms, mfu 1.79%
+iter 740: loss 4.7547, loss_eval:4.7547  time 411.86ms, mfu 1.78%
+step 750: train loss 4.7335, val loss 5.2412
+
+
+iter 990: loss 4.3063, loss_eval:4.3063  time 414.63ms, mfu 1.80%
+step 1000: train loss 4.4130, val loss 5.1087
+
+iter 1240: loss 4.2099, loss_eval:4.2099  time 408.33ms, mfu 1.82%
+step 1250: train loss 4.2325, val loss 5.0573
+
+iter 1490: loss 4.1146, loss_eval:4.1146  time 322.41ms, mfu 1.84%
+step 1500: train loss 4.0676, val loss 5.0974
+
+
+### with less attention head
+iter 470: loss 5.2525, loss_eval:5.2525  time 407.72ms, mfu 1.77%
+iter 480: loss 5.3915, loss_eval:5.3915  time 401.58ms, mfu 1.78%
+iter 490: loss 5.2891, loss_eval:5.2891  time 402.85ms, mfu 1.78%
+step 500: train loss 5.4244, val loss 5.6316
+
+iter 720: loss 5.0812, loss_eval:5.0812  time 421.52ms, mfu 1.83%
+iter 730: loss 5.1902, loss_eval:5.1902  time 409.62ms, mfu 1.82%
+iter 740: loss 4.9658, loss_eval:4.9658  time 385.92ms, mfu 1.83%
+step 750: train loss 4.9113, val loss 5.3787
+
+iter 990: loss 4.5471, loss_eval:4.5471  time 400.76ms, mfu 1.81%
+step 1000: train loss 4.6388, val loss 5.2777
+saving checkpoint to out-shakespeare-word-GPT_13-adamw-method12
+
+        ''' 
+
+        block0 = self.transformer.h_dec[0]
+
+        h2 = torch.zeros((b,t,e),device=device)
+        x_init = x
+        # h2 = torch.zeros((b,t,e),device=device) + x_init
+        for i in range(3):
+            # enumerate(self.transformer.h_dec):
+            # block0 = random.choice(self.transformer.h_dec)
+            x0    = x[:,:-1]
+            dx = 0. 
+            for ii,block in enumerate(self.transformer.h_dec):
+                # dx     += block(h2)
+                dx     += block0(h2)
+            # h2 = 0.5 * (h2 + dx) 
+            # h2 = (0.5*(x_init + dx / (ii+1)))
+            h2 = (0.5*(x_init + dx / (ii+1)) + h2)*0.5
+            # x = dx / (ii+1)
+        x = h2
+
+        # x = x- pos_emb
+        x     = self.transformer.ln_f(x)            
+
+
+        logits = self.lm_head(x)
+
+        ### (b,t)
+        if targets is not None:
+            lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        else:
+            lp_external = torch.zeros_like(logits[:,:,0])
+        # ct = target_not_null.sum(1)
+        return logits, lp_internal,lp_external                
+
+
+class CM01(GPT_01):
+    '''
+    compress the internal representation to discrete representations
+    g200 
+
+
+### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        config.n_internal = config.n_embd//16
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT_01,self).__init__()
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne = config.n_embd
+        nh = config.n_head
+        nei = config.n_internal
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            # k_query = nn.Linear(config.n_embd,config.n_embd, ),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_output   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne,nh*nei,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t    = idx.size()
+        ns      = 1
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_internal
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ##(ns,b)        
+        if 0:
+            pass
+        elif method in (8,10,12):
+            ### re weighted sample using q()
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            # loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+        else:
+            assert 0
+        ### (b,v)
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+        return logits, loss_grad, loss_valid
+
+
+    def _forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        cpt = torch.zeros((b,t,e),device=device)+ x
+        x_init = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### (tc,tp)
+        ### need to concat a single prefix to avoid
+        att_mask = torch.tril(att_mask, diagonal=1)
+        # ### (tp,tc)
+        nei = config.n_internal
+        md = self.transformer
+        # att_mask = att_mask.T
+
+        def get_xpred(cpt):
+            ### (b,tp,nh,nei)
+            # xpred = cpt.matmul(wo).reshape((b,t,nh,ne))
+            # xpred = md.lin_output(cpt).sigmoid().reshape((b,t,nh,ne))
+            xpred = md.lin_output(cpt).reshape((b,t,nh,nei))
+            return xpred
+
+
+        def get_cpred(x,cpt):
+            ### (b,tp,nei,nh,tc)
+            ### no skip connection for the momenta
+            cpred = md.lin_transit(cpt).reshape((b,t,nei,nh,1)).expand((b,t,nei,nh,t)) 
+            cpred = cpred + md.lin_input(x).transpose(1,2)[:,None,:,None,:].expand((b,t,nei,nh,t)) 
+            cpred = 0.5 * cpred
+            return cpred
+
+        for i in range(4):
+            # dx = 0. 
+            ### calculate the prediction of different models
+            # wo = md.lin_output.weight
+
+            ### tp for past t
+            ### (b,tp,ne,tc)
+            # xrep = x.transpose(1,2)[:,None].expand(b,t,ne,t)
+
+            ## (b,tp,ne,nh,tc)
+            ### (b,tp,ne,tc)
+            # crep = cpt.transpose(1,2)[:,None].expand(b,t,ne,t)
+
+            xpred = get_xpred(cpt)
+            cpred = get_cpred(x,cpt)
+
+
+            ### (b,tp,nh,tc)
+            lp = 0.
+            # lp += xpred.matmul(xrep) 
+            lp += torch.einsum('bphe,bce->bphc',xpred,x.matmul(md.lin_internal_output.weight)) 
+            lp += torch.einsum('bpehc,bce->bphc',cpred,cpt.matmul(md.lin_internal.weight))
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)
+            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            # att = lp.reshape9.softmax((2,3))
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+            # 2,3))
+            dcpt = torch.einsum('bchp,bpehc->bce', att, cpred).matmul(md.lin_internal.weight.T)
+            cpt = cpt + 0.1*dcpt
+
+        # xpred = md.lin_output(dcpt).reshape((b,t,nh,nei))
+        xpred = get_xpred(cpt)
+        xpred = xpred.matmul(md.lin_internal_output.weight.T).reshape((b,t,nh,ne))
+        x = xpred
+
+        x     = self.transformer.ln_f(x)            
+# 
+
+        logits = self.lm_head(x).log_softmax(-1).logsumexp(2)-math.log(nh)
+
+        # print(logits.shape)
+        # breakpoint()
+
+        ### (b,t)
+        if targets is not None:
+            lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        else:
+            lp_external = torch.zeros_like(logits[:,:,0])
+        # ct = target_not_null.sum(1)
+        return logits, lp_internal,lp_external                
+
+
+        
+class GPT_RNN01(GPT_01):
+    '''
+    sample a binary internal representation
+
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+
+        # config.k = 2
+        # config.g = 2
+
+        # config.n_layer= 1
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT_01,self).__init__()
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        # print(config)
+        # breakpoint()
+        # config.nh = n_h = config.n_embd * 2
+        config.nh = n_h = config.n_embd 
+        ne = config.n_embd
+        self.transformer = nn.ModuleDict(dict(
+            v_input   = nn.Linear(config.n_embd, n_h),
+            v_transit = nn.Linear(n_h,n_h,),
+            v_output = nn.Linear(n_h,ne,),
+
+            c_input   = nn.Linear(config.n_embd, n_h),
+            c_transit = nn.Linear(n_h,n_h,),
+
+
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # # k_query = nn.Linear(config.n_embd,config.k, ),
+            # k_query = nn.Linear(config.n_embd,config.n_embd, ),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            # h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            # h_dec = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        ns = 5
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_internal
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+
+        ### use a lower bound by summing over the hidden variable
+        # loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ### use variational approximation from the samples
+        loss_valid = -(lp_external.sum(-1).logsumexp(0) - math.log(ns)).sum(0)/ct.sum(0)
+
+        ##(ns,b)        
+        if 0:
+            pass
+        elif method in (8,10):
+            ### re weighted sample using q()
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            # loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+        elif method == 12:
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+            reweight_lp  = lp_total + reweight_lp.detach()
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+        else:
+            assert 0
+        ### (b,v)
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+        return logits, loss_grad, loss_valid
+
+
+    def _forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+        # forward the GPT model itself
+        
+        nh = self.config.nh
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        h  = torch.zeros((b, t+1, nh),device=device).float()
+        lp_internal = torch.zeros((b,),device=device)
+
+        p_update = 0.5
+        def get_h2():
+            h2_prop = 0.
+            # h2_prop = (md.v_input(tok_emb) + md.v_transit(h1) + h2)*0.5
+            # h2_prop = (md.v_input(tok_emb) + md.v_transit(h1) + h1)*0.5
+            # h2_prop = (md.v_input(tok_emb) + md.v_transit(h1))
+            h2_prop = (md.v_input(tok_emb) + md.v_transit(h1)).sigmoid()
+            # h2_prop  = (h2_prop  + h2)*0.5
+            h2_prop  = (h2_prop  + h1)*0.5
+            return h2_prop
+
+        # for i in range(5):
+        for i in range(10):
+
+            h1     = h[ :, :-1]
+            
+            
+            #### p_copy 
+            # p_prop  = (p_copy * h1) + (1-p_copy) * p_rand 
+
+            h2      = h[:,1:].float()
+            
+            h2_prop = get_h2()
+            # h2_prop = h2_prop + torch.normal(0.,1.,size=h2_prop.shape,device=device)
+            # h2_prop = h2_prop + torch.normal(0., 0.1, size=h2_prop.shape,device=device)
+            # h2_prop = h2_prop + torch.normal(0., 0.05, size=h2_prop.shape,device=device)
+            h2_prop = h2_prop + torch.normal(0., 0.1, size=h2_prop.shape,device=device)
+            
+
+            # # prop = (md.v_input(tok_emb) + md.v_transit(h1)).sigmoid()
+            # updater = torch.rand_like(p_prop[:,:,:1])< p_update
+            # h[:,1:] = h2_prop * updater + h2 * ~updater 
+            
+            h[:,1:] = h2_prop.detach()
+            
+            # lp_internal_d  = (p_prop.log()*h2 + (1-p_prop).log() * (1-h2))            
+            # lp_internal_d  = (lp_internal_d*updater).sum(-1).sum(-1)
+            # lp_internal   += lp_internal_d
+
+
+        h1   = h[ :, :-1]
+        h2   = h[:,1:].float()
+        # h2_prop = (md.v_input(tok_emb) + md.v_transit(h1) + h1)*0.5
+        h2_prop = get_h2()
+        # h2_prop = (md.v_input(tok_emb) + md.v_transit(h1) + h2)*0.5
+
+        # ### (b,t)
+        # h1   = h[ :, :-1]
+        # p_copy = (md.c_input(tok_emb) + md.c_transit(h1)).sigmoid()
+        # p_rand = (md.v_input(tok_emb) + md.v_transit(h1)).sigmoid()
+        # p_copy = (md.c_input(tok_emb) + md.c_input(h1)).sigmoid()
+        # p_rand = (md.v_input(tok_emb) + md.v_transit(h1)).sigmoid()
+        
+        lp_internal = -(h2_prop - h2).square().sum(-1).sum(-1)
+        ### p_copy 
+        # p_prop      = (p_copy * h1) + (1-p_copy) * p_rand 
+        # lp_internal = (p_prop.log()*h2 + (1-p_prop).log() * (1-h2)).sum(-1).sum(-1)
+        # lp_internal = lp_internal
+
+
+        ### (b,t,ne)
+        
+        # target_not_null = targets != self.config.mask_index 
+
+        # lp_internal = torch.zeros((b,),device=device)
+
+        x = md.v_output(h2)
+        # x      = self.transformer.ln_f(x)            
+        logits = self.lm_head(x)
+
+        ### (b,t)
+        if targets is not None:
+            lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        else:
+            lp_external = torch.zeros_like(logits[:,:,0])
+        # ct = target_not_null.sum(1)
+        return logits, lp_internal,lp_external
+
 
 
 
 class GPT_GRU(GPT_01):
-
 
 
     def __init__(self, config):
@@ -1184,7 +2992,9 @@ class GPT_GRU(GPT_01):
         config.Z = Z
 
         config.vocab_size = config.vocab_size+1  
+        # self.v_input = nn.Linear(config.n_embd, )
         self.transformer = nn.ModuleDict(dict(
+
             wte = nn.Embedding(config.vocab_size+1, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
@@ -1205,9 +3015,6 @@ class GPT_GRU(GPT_01):
 
         # self.rnn  
 
-        # Z = 
-        # self.rnn = nn.GRU(Z, Z, D, batch_first=True,)
-        # .to(device)
 
 
         # init all weights
@@ -1812,8 +3619,15 @@ step 3000: train loss 3.3999, val loss 4.6811
 # GPT = GPT_02    
 # GPT = GPT_03 
 # GPT = GPT_01    
-GPT = GPT_07    
-GPT = GPT_08    
+# GPT = GPT_07    
+# GPT = GPT_08    
+# GPT = GPT_10    
+GPT = GPT_RNN01
+GPT = GPT_11    
+GPT = GPT_13    
+GPT = CM01
+# GPT = GPT_01    
+# GPT = GPT_09    
 # GPT = GPT_05  
 # GPT = GPT_GRU
 # GPT = GPT_06    

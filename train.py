@@ -76,7 +76,7 @@ method = 0
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-
+optimizer = 'adamw'
 # compile = True # use PyTorch 2.0 to compile the model to be faster
 # is_dynamic= False
 
@@ -102,7 +102,27 @@ if ddp:
     torch.cuda.set_device(device)
     master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
     seed_offset = ddp_rank # each process gets a different seed
-    # world_size number of processes will be training simultaneously, so we can scale
+    # world_size number of processes will be training simultaneously, so we can scaleve
+                    # ### (b, t, e)
+                    # # xk = md.ln_f(k_query(x-pos_emb))
+                    # ### (b, t, g)
+                    # logits  = x.matmul( k_vects.T )/self.config.n_embd**0.5
+                    # gk_dist = torch.distributions.Categorical(logits = logits )
+                    # ### (b, t)
+                    # gk      = gk_dist.sample() 
+                    # # breakpoint()
+                    # ### (b, t, e)
+                    # # breakpoint()
+                    # gv      = g_vects[gk,:]
+                    # # xx      = torch.cat([gv[:,:,None],x[:,:,None]],dim=2)
+                    # # xx      = xx.reshape((b,2*t,e))
+                    # xx     = x
+                    # xx     = (block(xx) + gv)*0.5
+                    
+                    # # xx     = xx.reshape((b,t,2,e))[:,:,-1]
+                    # x      = self.transformer.ln_f(xx)
+                    # lp_internal += (gk_dist.log_prob(gk)).sum(-1)
+
     # down the desired gradient accumulation iterations per process proportionally
     assert gradient_accumulation_steps % ddp_world_size == 0
     gradient_accumulation_steps //= ddp_world_size
@@ -155,6 +175,7 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout,
+                  optimizer=optimizer,
                   method=method) # start with model_args from command line
 
 gptconf = GPTConfig(**model_args)
@@ -180,7 +201,13 @@ elif init_from == 'resume':
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        setattr(gptconf,k , checkpoint_model_args[k])
+        setattr(gptconf, k , checkpoint_model_args[k])
+
+    if gptconf.vocab_size is None:
+        if meta_vocab_size is None:
+            print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+        gptconf.vocab_size = meta_vocab_size if meta_vocab_size is not None else 50304
+    # assert gptconf.vocab_size is not None,gptconf
     # create the model
     # gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
@@ -243,7 +270,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, _, loss  = model(X, Y, gradient_only = False)
+                logits, _, loss  = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -319,7 +346,7 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss, loss_eval = model(X, Y, gradient_only = True)
+            logits, loss, loss_eval = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

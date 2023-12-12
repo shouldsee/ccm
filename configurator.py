@@ -17,6 +17,7 @@ comes up with a better simple Python solution I am all ears.
 import sys
 from ast import literal_eval
 
+# def main():
 for arg in sys.argv[1:]:
     if '=' not in arg:
         # assume it's the name of a config file
@@ -45,3 +46,4 @@ for arg in sys.argv[1:]:
             globals()[key] = attempt
         else:
             raise ValueError(f"Unknown config key: {key}")
+# main()

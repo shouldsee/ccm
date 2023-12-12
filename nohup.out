@@ -1400,3 +1400,124 @@ iter 4980: loss 3.7337, time 5787.14ms, mfu 0.32%
 iter 4990: loss 3.9703, time 5632.70ms, mfu 0.32%
 step 5000: train loss 3.8426, val loss 4.9985
 iter 5000: loss 3.5940, time 103475.78ms, mfu 0.29%
+[pid] 8430
+Overriding config with config/train_shakespeare.py:
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-shakespeare-word'
+eval_interval = 250 # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10 # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False # override via command line if you like
+wandb_project = 'shakespeare'
+wandb_run_name = 'mini-gpt'
+
+dataset = 'shakespeare'
+# gradient_accumulation_steps = 1
+# gradient_accumulation_steps = 6
+gradient_accumulation_steps = 12
+batch_size = 12
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 256 # context of up to 256 previous characters
+block_size = 64 # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+# learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+learning_rate = 1e-4 # with baby networks can afford to go a bit higher
+
+# max_iters = 5000
+# lr_decay_iters = 5000 # make equal to max_iters usually
+
+max_iters = 500000
+lr_decay_iters = 500000 # make equal to max_iters usually
+
+min_lr = 1e-5 # learning_rate / 10 usually
+beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100 # not super necessary potentially
+
+# on macbook also add
+# device = 'cpu'  # run on cpu only
+# compile = False # do not torch compile the model
+# init_from ='resume'
+Overriding: method = 12
+Overriding: init_from = resume
+tokens per iteration will be: 9,216
+Resuming training from out-shakespeare-word-GPT_15-adamw-method12
+defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)
+GPTConfig(block_size=64, vocab_size=50304, n_layer=6, n_head=24, n_embd=384, dropout=0.2, bias=False, share_kv=False, optimizer='adamw', method=12, is_causal=True, use_dropout=0)
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+number of parameters: 54.71M
+num decayed parameter tensors: 98, with 54,730,752 parameters
+num non-decayed parameter tensors: 13, with 4,992 parameters
+using fused AdamW: True
+step 2250: train loss 5.8104, val loss 7.1679
+iter 2250: loss 5.7970, loss_eval:5.7970  time 11229.34ms, mfu -100.00%
+iter 2260: loss 4.2811, loss_eval:4.2811  time 555.17ms, mfu 1.76%
+iter 2270: loss 3.9283, loss_eval:3.9283  time 554.24ms, mfu 1.76%
+iter 2280: loss 3.9748, loss_eval:3.9748  time 554.50ms, mfu 1.76%
+iter 2290: loss 4.1732, loss_eval:4.1732  time 554.43ms, mfu 1.76%
+iter 2300: loss 3.9550, loss_eval:3.9550  time 555.68ms, mfu 1.76%
+iter 2310: loss 4.1200, loss_eval:4.1200  time 342.56ms, mfu 1.87%
+iter 2320: loss 4.0401, loss_eval:4.0401  time 334.68ms, mfu 1.97%
+iter 2330: loss 3.9041, loss_eval:3.9041  time 341.91ms, mfu 2.06%
+iter 2340: loss 3.9323, loss_eval:3.9323  time 336.72ms, mfu 2.14%
+iter 2350: loss 4.1751, loss_eval:4.1751  time 342.60ms, mfu 2.21%
+iter 2360: loss 3.9024, loss_eval:3.9024  time 337.48ms, mfu 2.28%
+iter 2370: loss 3.8816, loss_eval:3.8816  time 332.53ms, mfu 2.35%
+iter 2380: loss 3.9001, loss_eval:3.9001  time 345.77ms, mfu 2.39%
+iter 2390: loss 3.7486, loss_eval:3.7486  time 330.71ms, mfu 2.45%
+iter 2400: loss 3.9036, loss_eval:3.9036  time 353.20ms, mfu 2.48%
+iter 2410: loss 3.9925, loss_eval:3.9925  time 332.97ms, mfu 2.52%
+iter 2420: loss 3.7809, loss_eval:3.7809  time 333.82ms, mfu 2.56%
+iter 2430: loss 3.9464, loss_eval:3.9464  time 336.10ms, mfu 2.60%
+iter 2440: loss 3.7759, loss_eval:3.7759  time 345.58ms, mfu 2.62%
+iter 2450: loss 3.9006, loss_eval:3.9006  time 342.78ms, mfu 2.64%
+iter 2460: loss 3.8909, loss_eval:3.8909  time 337.22ms, mfu 2.67%
+iter 2470: loss 3.8970, loss_eval:3.8970  time 276.19ms, mfu 2.75%
+iter 2480: loss 3.7215, loss_eval:3.7215  time 350.97ms, mfu 2.76%
+iter 2490: loss 3.8147, loss_eval:3.8147  time 348.52ms, mfu 2.76%
+step 2500: train loss 3.8282, val loss 5.0242
+iter 2500: loss 3.9084, loss_eval:3.9084  time 6522.14ms, mfu 2.50%
+iter 2510: loss 4.1169, loss_eval:4.1169  time 342.37ms, mfu 2.53%
+iter 2520: loss 3.6374, loss_eval:3.6374  time 347.30ms, mfu 2.56%
+iter 2530: loss 3.8555, loss_eval:3.8555  time 344.79ms, mfu 2.59%
+Traceback (most recent call last):
+  File "train.py", line 349, in <module>
+    logits, loss, loss_eval = model(X, Y, gradient_only = True)
+  File "/root/miniconda3/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1501, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/nanoGPT/model.py", line 2798, in forward
+    (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+  File "/root/nanoGPT/model.py", line 2889, in _forward
+    dh = dh + 0.1*(block.mlp(dhh)+block.mlp2(dh))
+  File "/root/miniconda3/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1501, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/nanoGPT/model.py", line 110, in forward
+    x = self.c_fc(x)
+  File "/root/miniconda3/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1501, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/miniconda3/lib/python3.8/site-packages/torch/nn/modules/linear.py", line 114, in forward
+    return F.linear(input, self.weight, self.bias)
+KeyboardInterrupt

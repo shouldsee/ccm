@@ -2255,7 +2255,7 @@ step 1500: train loss 3.7759, val loss 4.8632
         
         # cpt       = (torch.zeros((b,t,e),device=device)+ x.matmul(md.lin_output.weight.T)).detach()
         # cpt2      = (torch.zeros((b,t,e),device=device)+ md.lin_input_2(cpt)).detach()
-        # x
+
         # x_init   = x
         att_mask = torch.ones((t,t),device=device).bool()
         ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
@@ -2327,8 +2327,6 @@ step 1500: train loss 3.7759, val loss 4.8632
             cpt2  = cpt2 + 0.1*dcpt2
 
         
-
-
         x     = cpt2.matmul(md.lin_output_3.weight)
         # print(x.shape)
 

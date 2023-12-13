@@ -328,3 +328,2054 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+
+
+
+import torch.nn as nn
+# class CCM01(nn.Module):
+class CCM01(GPT):
+    '''
+    compress the internal representation to discrete representations
+    g200 
+
+
+iter 1480: loss 4.1011, time 94.83ms, mfu 3.64%
+iter 1490: loss 4.1817, time 94.83ms, mfu 3.65%
+step 1500: train loss 4.1789, val loss 5.0421
+saving checkpoint to out-shakespeare-word
+
+step 2000: train loss 4.0252, val loss 5.0605
+step 1500: train loss 4.0410, val loss 4.9773
+
+
+
+    ### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        # config.n_internal = config.n_embd//16
+        config.n_internal = config.n_embd//4
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne = config.n_embd
+        nh = config.n_head
+        nei = config.n_internal
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_output   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit   = nn.Linear(ne,nh*nei,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input     = nn.Linear(ne,nei,bias=config.bias),
+            lin_input_2   = nn.Linear(ne,ne,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        cpt      = torch.zeros((b,t,e),device=device)+ x
+        x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+
+        def get_xpred(cpt):
+            ### (b,tp,nh,nei)
+            # xpred = cpt.matmul(wo).reshape((b,t,nh,ne))
+            # xpred = md.lin_output(cpt).sigmoid().reshape((b,t,nh,ne))
+            xpred = md.lin_output(cpt).reshape((b,t,nh,nei))
+            return xpred
+
+
+        def get_cpred(x,cpt):
+            ### (b,tp,nei,nh,tc)
+            ### no skip connection for the momenta
+            cpred = md.lin_transit(cpt).reshape((b,t,nei,nh,1)).expand((b,t,nei,nh,t)) 
+            cpred = cpred + md.lin_input(x).transpose(1,2)[:,None,:,None,:].expand((b,t,nei,nh,t)) 
+            cpred = 0.5 * cpred
+            # cpred = cpred.sigmoid()
+            return cpred
+
+        for i in range(4):
+            xpred = get_xpred(cpt)
+            cpred = get_cpred(x,cpt)
+
+            ### (b,tp,nh,tc)
+            lp = 0.
+            # lp += xpred.matmul(xrep) 
+            lp += torch.einsum('bphe,bce->bphc', xpred, x.matmul(md.lin_internal_output.weight)) 
+            lp += torch.einsum('bpehc,bce->bphc',cpred, cpt.matmul(md.lin_internal.weight))
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)
+            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            # att = lp.reshape.softmax((2,3))
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+            # 2,3))
+            # breakpoint()    
+            dcpt = torch.einsum('bchp,bpehc->bce', att, cpred).matmul(md.lin_internal.weight.T)
+            cpt = cpt + 0.1*dcpt
+
+        # xpred = md.lin_output(dcpt).reshape((b,t,nh,nei))
+        xpred = get_xpred(cpt)
+        xpred = xpred.matmul(md.lin_internal_output.weight.T).reshape((b,t,nh,ne))
+        x     = xpred
+
+        x     = self.transformer.ln_f(x)            
+
+        logits= self.lm_head(x).log_softmax(-1).logsumexp(2)-math.log(nh)
+
+
+        # if targets is not None:
+        #     lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        #     # lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        # else:
+        #     lp_external = torch.zeros_like(logits[:,:,0])
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss         
+
+    def forward_random(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t    = idx.size()
+        ns      = 1
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_internal
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ##(ns,b)        
+        if 1:
+            ### re weighted sample using q()
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            # loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+
+        ### (b,v)
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+        return logits, loss_grad, loss_valid
+
+
+
+import torch.nn as nn
+# class CCM01(nn.Module):
+class CCM02(GPT):
+    '''
+
+calculating the rnn transition to use atttended vector
+
+
+
+iter 1480: loss 4.1011, time 94.83ms, mfu 3.64%
+iter 1490: loss 4.1817, time 94.83ms, mfu 3.65%
+step 1500: train loss 4.1789, val loss 5.0421
+
+step 2000: train loss 4.0252, val loss 5.0605
+
+
+    ### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        config.n_internal = config.n_embd//16
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne = config.n_embd
+        nh = config.n_head
+        nei = config.n_internal
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_output   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne,nh*nei,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        cpt      = torch.zeros((b,t,e),device=device)+ x
+        x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+
+        def get_xpred(cpt):
+            ### (b,tp,nh,nei)
+            # xpred = cpt.matmul(wo).reshape((b,t,nh,ne))
+            # xpred = md.lin_output(cpt).sigmoid().reshape((b,t,nh,ne))
+            xpred = md.lin_output(cpt).reshape((b,t,nh,nei))
+            return xpred
+
+
+        def get_cpred(x,cpt):
+            ### (b,tp,nei,nh,tc)
+            ### no skip connection for the momenta
+            cpred = md.lin_transit(cpt).reshape((b,t,nei,nh,1)).expand((b,t,nei,nh,t)) 
+            cpred = cpred + md.lin_input(x).transpose(1,2)[:,None,:,None,:].expand((b,t,nei,nh,t)) 
+            cpred = 0.5 * cpred
+            # cpred = cpred.sigmoid()
+            return cpred
+
+        for i in range(4):
+            xpred = get_xpred(cpt)
+            cpred = get_cpred(x,cpt)
+
+            ### (b,tp,nh,tc)
+            lp = 0.
+            # lp += xpred.matmul(xrep) 
+            lp += torch.einsum('bphe,bce->bphc', xpred, x.matmul(md.lin_internal_output.weight)) 
+            lp += torch.einsum('bpehc,bce->bphc',cpred, cpt.matmul(md.lin_internal.weight))
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)
+            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            # att = lp.reshape.softmax((2,3))
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+            # 2,3))
+            # breakpoint()    
+            dcpt = torch.einsum('bchp,bpehc->bce', att, cpred).matmul(md.lin_internal.weight.T)
+            cpt = cpt + 0.1*dcpt
+
+        # xpred = md.lin_output(dcpt).reshape((b,t,nh,nei))
+        xpred = get_xpred(cpt)
+        xpred = xpred.matmul(md.lin_internal_output.weight.T).reshape((b,t,nh,ne))
+        x     = xpred
+
+        x     = self.transformer.ln_f(x)            
+
+        logits= self.lm_head(x).log_softmax(-1).logsumexp(2)-math.log(nh)
+
+
+        # if targets is not None:
+        #     lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        #     # lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        # else:
+        #     lp_external = torch.zeros_like(logits[:,:,0])
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss         
+
+    def forward_random(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t    = idx.size()
+        ns      = 1
+        idx     = idx[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+
+        if targets is not None:
+            target_not_null = targets != self.config.mask_index 
+            targets = targets[None].expand((ns,b,t)).reshape((ns*b,t))#.contiguous()
+        else:
+            target_not_null = torch.ones_like(idx)
+        ct = target_not_null.sum(1)
+
+
+        (logits, lp_internal, lp_external) = self._forward(idx,targets,gradient_only)
+
+        ### (nsb,t)
+        g = self.config.g
+        k = self.config.k
+        lp_k = k*math.log(1./t) + k*math.log(1/g)  ### adding prior on pk and gk var
+        lp_total   = lp_external.sum(1)  + lp_internal
+
+        method = self.config.method
+        logits = logits.reshape(((ns,b,t,-1)))
+
+        lp_internal = lp_internal.reshape((ns,b))
+        lp_total    = lp_total.reshape((ns,b,))
+        lp_external = lp_external.reshape((ns,b,t))   
+
+        ### sampling from posterior is difficult
+        ### https://www.cs.ubc.ca/~schmidtm/Courses/540-W20/L30.pdf
+        
+        # loss_valid = -(lp_total.sum(-1).logsumexp(0) - math.log(ns))/ct.sum(0)
+        loss_valid = -(lp_total.logsumexp(0).sum(0))/ct.sum(0)
+
+        ##(ns,b)        
+        if 1:
+            ### re weighted sample using q()
+            ##(ns,b)
+            reweight_lp  = lp_external.sum(2).log_softmax(0) 
+
+            reweight_lp  = lp_total + reweight_lp.detach()
+            # loss_grad  = -(reweight_lp.logsumexp(0).sum(0))/ct.sum(0)
+            loss_grad  = -(reweight_lp.mean(0).sum(0))/ct.sum(0)
+            # loss_grad = -( lp_external.sum(1) + lp_external.sum(1).detach() * lp_internal).sum(0)/ct.sum(0)# * 10
+
+        ### (b,v)
+        logits = (lp_internal[:,:,None,None] + logits.log_softmax(-1)).logsumexp(0)
+
+        return logits, loss_grad, loss_valid
+
+
+import torch.nn as nn
+# class CCM01(nn.Module):
+class CCM02(GPT):
+    '''
+    CCM02 insert an attention module in the token genration of the underlying machine
+
+
+iter 1480: loss 4.1011, time 94.83ms, mfu 3.64%
+iter 1490: loss 4.1817, time 94.83ms, mfu 3.65%
+step 1500: train loss 4.1789, val loss 5.0421
+saving checkpoint to out-shakespeare-word
+
+step 2000: train loss 4.0252, val loss 5.0605
+step 1500: train loss 4.0410, val loss 4.9773
+
+step 1250: train loss 4.0988, val loss 4.9496
+
+step 1500: train loss 3.9799, val loss 4.9250
+step 1750: train loss 3.8957, val loss 4.9027
+
+
+2 layer
+step 1750: train loss 3.8957, val loss 4.9026
+
+
+3 layer
+step 1750: train loss 3.9735, val loss 4.9492
+step 2000: train loss 3.8794, val loss 4.9326
+
+
+### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        # config.n_internal = config.n_embd//16
+        config.n_internal = config.n_embd//4
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne = config.n_embd
+        nh = config.n_head
+        nei = config.n_internal
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_output   = nn.Linear(ne, nh*nei,bias=config.bias),
+            # lin_output_2   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_output_ctx   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne,nh*nei,bias=config.bias),
+            lin_transit_ctx = nn.Linear(ne,nh*nei,bias=config.bias),
+            lin_cpt_attention = nn.Linear(ne,ne,bias=config.bias),
+            lin_cpt_attention_2 = nn.Linear(ne,ne,bias=config.bias),
+            lin_ctx = nn.Linear(ne,ne,bias=config.bias),
+            lin_ctx_2 = nn.Linear(ne,ne,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        cpt      = torch.zeros((b,t,e),device=device)+ x
+        x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+
+        def get_xpred(cpt,ctx):
+            ### (b,tp,nh,nei)
+            # xpred = cpt.matmul(wo).reshape((b,t,nh,ne))
+            # xpred = md.lin_output(cpt).sigmoid().reshape((b,t,nh,ne))
+            #### adding a context
+            xpred = (md.lin_output(cpt) + md.lin_output_ctx(ctx)).reshape((b,t,nh,nei))
+            return xpred
+
+
+        def get_cpred(x,cpt,ctx):
+            ### (b,tp,nei,nh,tc)
+            ### no skip connection for the momenta
+            cpred = (md.lin_transit(cpt) + md.lin_transit_ctx(ctx)).reshape((b,t,nei,nh,1)).expand((b,t,nei,nh,t)) 
+            cpred = cpred + md.lin_input(x).transpose(1,2)[:,None,:,None,:].expand((b,t,nei,nh,t)) 
+            cpred = 0.5 * cpred
+            # cpred = cpred.sigmoid()
+            return cpred
+
+        def get_ctx_2(cpt):
+            return cpt
+            cpt = (cpt)
+            watt = md.lin_cpt_attention_2.weight
+            lp  = cpt.matmul(watt).matmul(cpt.transpose(1,2))
+            lp  = lp.masked_fill(att_mask[None,:,:]==0,float('-inf'))
+            att = lp.softmax(2)
+
+            ctx = att.matmul( cpt.matmul(watt.T) )
+            ctx = md.lin_ctx_2(ctx).relu()
+            return (ctx + cpt) * 0.5 
+
+        def get_ctx(cpt):
+            ### (b,tc,tp)
+            cpt = get_ctx_2(cpt)
+            lp  = cpt.matmul(md.lin_cpt_attention.weight).matmul(cpt.transpose(1,2))
+            lp  = lp.masked_fill(att_mask[None,:,:]==0,float('-inf'))
+            att = lp.softmax(2)
+
+            ctx = att.matmul( cpt.matmul(md.lin_cpt_attention.weight.T) )
+            ctx = md.lin_ctx(ctx).relu()
+            return (ctx + cpt)*0.5
+
+        for i in range(4):
+            ### (b,tp,e)
+
+            # cptc = cpt
+            # for i in range(3):
+            #     cptc = cptc + 0.1 *  get_ctx(cpt)
+            ctx = get_ctx(cpt)
+            
+            # .matmul()
+            xpred = get_xpred(cpt,ctx)
+            cpred = get_cpred(x,cpt,ctx)
+
+            ### (b,tp,nh,tc)
+            lp = 0.
+            # lp += xpred.matmul(xrep) 
+            lp += torch.einsum('bphe,bce->bphc', xpred, x.matmul(md.lin_internal_output.weight)) 
+            lp += torch.einsum('bpehc,bce->bphc',cpred, cpt.matmul(md.lin_internal.weight))
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)
+            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            # att = lp.reshape.softmax((2,3))
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+            # 2,3))
+            # breakpoint()    
+            dcpt = torch.einsum('bchp,bpehc->bce', att, cpred).matmul(md.lin_internal.weight.T)
+            cpt = cpt + 0.1*dcpt
+
+        # xpred = md.lin_output(dcpt).reshape((b,t,nh,nei))
+
+        ctx = get_ctx(cpt)
+        
+        # .matmul()
+        # xpred = get_xpred(cpt,ctx)
+        # xpred = (md.lin_output_2(cpt)).reshape((b,t,nh,nei))
+            
+        xpred = get_xpred(dcpt,ctx)
+            # cpred = get_cpred(x,cpt,ctx)
+
+        xpred = xpred.matmul(md.lin_internal_output.weight.T).reshape((b,t,nh,ne))
+        x     = xpred
+
+        x     = self.transformer.ln_f(x)            
+
+        logits= self.lm_head(x).log_softmax(-1).logsumexp(2)-math.log(nh)
+
+
+        # if targets is not None:
+        #     lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        #     # lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        # else:
+        #     lp_external = torch.zeros_like(logits[:,:,0])
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss         
+
+
+class CCM03(GPT):
+    '''
+    CCM02 extend the token generation with a key value vector pair
+
+
+iter 1480: loss 4.1011, time 94.83ms, mfu 3.64%
+iter 1490: loss 4.1817, time 94.83ms, mfu 3.65%
+step 1500: train loss 4.1789, val loss 5.0421
+saving checkpoint to out-shakespeare-word
+
+step 2000: train loss 4.0252, val loss 5.0605
+step 1500: train loss 4.0410, val loss 4.9773
+
+step 1250: train loss 4.0988, val loss 4.9496
+
+step 1500: train loss 3.9799, val loss 4.9250
+step 1750: train loss 3.8957, val loss 4.9027
+
+
+### tying k=v
+step 1250: train loss 4.1273, val loss 4.9890
+
+###separate kv
+step 1250: train loss 4.1374, val loss 4.9755
+step 1500: train loss 4.0350, val loss 4.9298
+
+### k=v, but double the k dimension
+step 1250: train loss 4.1478, val loss 4.9866
+
+
+### g400, double k dimension
+# step 1250: train loss 4.1483, val loss 4.9636
+
+step 1250: train loss 4.1472, val loss 4.9646
+
+step 1250: train loss 4.1489, val loss 4.9862
+
+
+### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 400
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        # config.n_internal = config.n_embd//16
+        config.n_internal = config.n_embd//4
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne = config.n_embd
+        nh = config.n_head
+        nei = config.n_internal
+        # config.g = 200
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            k_vects = nn.Embedding(config.g, ne),
+            v_vects = nn.Embedding(config.g, ne),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_output   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_output_ctx   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne,nh*nei,bias=config.bias),
+            lin_transit_ctx = nn.Linear(ne,nh*nei,bias=config.bias),
+            lin_cpt_attention = nn.Linear(ne,ne,bias=config.bias),
+            lin_cpt_attention_2 = nn.Linear(ne,ne,bias=config.bias),
+            lin_cpt_attention_3 = nn.Linear(ne,ne,bias=config.bias),
+            # lin_ctx = nn.Linear(ne,ne,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        cpt      = torch.zeros((b,t,e),device=device)+ x
+        x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+
+        def get_xpred(cpt,ctx):
+            ### (b,tp,nh,nei)
+            # xpred = cpt.matmul(wo).reshape((b,t,nh,ne))
+            # xpred = md.lin_output(cpt).sigmoid().reshape((b,t,nh,ne))
+            #### adding a context
+            xpred = (md.lin_output(cpt) + md.lin_output_ctx(ctx)).reshape((b,t,nh,nei))
+            return xpred
+
+
+        def get_cpred(x,cpt,ctx):
+            ### (b,tp,nei,nh,tc)
+            ### no skip connection for the momenta
+            cpred = (md.lin_transit(cpt) + md.lin_transit_ctx(ctx)).reshape((b,t,nei,nh,1)).expand((b,t,nei,nh,t)) 
+            cpred = cpred + md.lin_input(x).transpose(1,2)[:,None,:,None,:].expand((b,t,nei,nh,t)) 
+            cpred = 0.5 * cpred
+            # cpred = cpred.sigmoid()
+            return cpred
+
+        # def get_ctx(cpt):
+        #     ### (nk,ne)
+        #     kv = md.k_vects.weight
+        #     vv = md.v_vects.weight
+
+        #     ### (b,tc,nk)
+        #     lp  = cpt.matmul(md.lin_cpt_attention.weight).matmul(kv.T)
+        #     # lp  = lp.masked_fill(att_mask[None,:,:]==0,float('-inf'))
+        #     att = lp.softmax(2)
+
+        #     # ctx = att.matmul( vv.matmul(md.lin_cpt_attention.weight.T) )
+        #     ctx = att.matmul( vv[:,:ne])
+        #     # .matmul(md.lin_cpt_attention.weight.T) )
+        #     return ctx
+
+
+        def get_ctx(cpt):
+            ### (nk,ne)
+            kv = md.k_vects.weight
+
+            ### (b,tc,nk)
+            lp  = cpt.matmul(md.lin_cpt_attention.weight).matmul(kv.T)
+            att = lp.softmax(2)
+            ctx = att.matmul( kv.matmul(md.lin_cpt_attention.weight.T) )
+            return ctx            
+
+
+        def get_ctx(cpt):
+            ctx = cpt
+            ### (nk,ne)
+            kv = md.k_vects.weight
+            # vv = md.v_vects.weight
+            ctx = 0.
+            ### (b,tc,nk)
+            lp  = cpt.matmul(md.lin_cpt_attention.weight).matmul(kv.T)
+            att = (lp).softmax(2)
+            ctx += (att.matmul( kv.matmul(md.lin_cpt_attention.weight.T) ))
+
+            # lp  = cpt.matmul(md.lin_cpt_attention_2.weight).matmul(kv.T)
+            # att = (lp).softmax(2)
+            # ctx += (att.matmul( kv.matmul(md.lin_cpt_attention_2.weight.T) ))
+
+            # lp  = cpt.matmul(md.lin_cpt_attention_3.weight).matmul(kv.T)
+            # att = (lp).softmax(2)
+            # ctx += (att.matmul( kv.matmul(md.lin_cpt_attention_3.weight.T) ))
+            return ctx    
+
+
+        # for i in range(8):
+        for i in range(4):
+            ### (b,tp,e)
+
+            # cptc = cpt
+            # for i in range(3):
+            #     cptc = cptc + 0.1 *  get_ctx(cpt)
+            ctx = get_ctx(cpt)
+            
+            # .matmul()
+            xpred = get_xpred(cpt,ctx)
+            cpred = get_cpred(x,cpt,ctx)
+
+            ### (b,tp,nh,tc)
+            lp = 0.
+            # lp += xpred.matmul(xrep) 
+            lp += torch.einsum('bphe,bce->bphc', xpred, x.matmul(md.lin_internal_output.weight)) 
+            lp += torch.einsum('bpehc,bce->bphc',cpred, cpt.matmul(md.lin_internal.weight))
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)
+            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            # att = lp.reshape.softmax((2,3))
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+            # 2,3))
+            # breakpoint()    
+            dcpt = torch.einsum('bchp,bpehc->bce', att, cpred).matmul(md.lin_internal.weight.T)
+            cpt = cpt + 0.1*dcpt
+            # cpt = cpt + torch.normal(0,0.01,cpt.shape,device=device)
+
+        # xpred = md.lin_output(dcpt).reshape((b,t,nh,nei))
+
+        ctx = get_ctx(cpt)
+        
+        # .matmul()
+        xpred = get_xpred(cpt,ctx)
+            # cpred = get_cpred(x,cpt,ctx)
+
+        xpred = xpred.matmul(md.lin_internal_output.weight.T).reshape((b,t,nh,ne))
+        x     = xpred
+        x     = self.transformer.ln_f(x)            
+
+        logits= self.lm_head(x).log_softmax(-1).logsumexp(2)-math.log(nh)
+
+
+        # if targets is not None:
+        #     lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=self.config.mask_index,reduction='none')
+        #     # lp_external  = -F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        # else:
+        #     lp_external = torch.zeros_like(logits[:,:,0])
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss         
+
+class CCM04(GPT):
+    '''
+    CCM04 extend the hidden state to have pre and post context 
+    
+step 2000: train loss 3.9162, val loss 4.9884
+step 1250: train loss 4.2499, val loss 5.0134
+step 2000: train loss 3.9712, val loss 4.9935
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 400
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        # config.n_internal = config.n_embd//16
+        config.n_internal = config.n_embd//4
+        config.n_internal = config.n_embd//4
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne  = config.n_embd
+        nh  = config.n_head
+        nei = config.n_internal
+        # config.g = 200
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            k_vects = nn.Embedding(config.g, ne),
+            v_vects = nn.Embedding(config.g, ne),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_init     = nn.Linear(ne, ne,bias=config.bias),
+            lin_output   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_output_ctx   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne,nh*nei,bias=config.bias),
+            lin_transit_ctx = nn.Linear(ne,nh*nei,bias=config.bias),
+            lin_cpt_attention = nn.Linear(ne,ne,bias=config.bias),
+            lin_cpt_attention_2 = nn.Linear(ne,ne,bias=config.bias),
+            lin_cpt_attention_3 = nn.Linear(ne,ne,bias=config.bias),
+            # lin_ctx = nn.Linear(ne,ne,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        cpt      = torch.zeros((b,t,e),device=device)  + md.lin_init(x)
+        ### context before 
+        cbt      = torch.zeros((b,t,e),device=device)  + md.lin_init(x)
+        # cpt = torch.normal(0,0.1,size=(b,t,e),device=device)
+        x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+
+        def get_xpred(cbt,ctx):
+            ### (b,tp,nh,nei)
+            #### adding a context
+            #### cpt 
+            xpred = (md.lin_output(cbt)).reshape((b,t,nh,nei))
+            return xpred
+
+        def get_cpred(x,cbt,ctx):            
+            ### (b,tp,nei,nh,tc)
+            ### no skip connection for the moment
+            # cpred = (md.lin_transit(cbt)).reshape((b,t,nei,nh,1)).expand((b,t,nei,nh,t)) 
+            cpred = cbt.matmul(md.lin_transit.weight.T)
+            cpred = cpred + md.lin_input(x)
+            # cpred = 
+            cpred = 0.5 * cpred
+            cpred = cpred.matmul(md.lin_internal.weight.T)
+            # cpred = cpred.sigmoid()
+            return cpred
+
+
+        for i in range(4):
+            ### (b,tp,e)
+
+            #### calculate alternative hypotheses w.r.t. the word emission.
+            # xpred   = get_xpred(cbt,ctx)
+            cptpred = get_cpred(x,cbt,None)
+
+            ### (b,tp,nh,tc)
+            lp  = 0.
+            lp += torch.einsum('bpe,hbce->bphc', cpt, cbt[None])
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+
+            # breakpoint()    
+            dcbt = 0.
+            dcbt += torch.einsum('bchp,hbpe->bce',  att, cpt[None]) 
+            dcbt += cpt.matmul(md.lin_internal.weight).matmul(md.lin_transit.weight)
+            dcpt = cptpred
+            # dcpt = torch.einsum('bchp,bpehc->bce', att, cptpred).matmul(md.lin_internal.weight.T)
+            # cpt = cpt + 0.1*dcptstep 2000: train loss 3.9712, val loss 4.9935
+
+            cpt = cpt + 0.2*dcpt
+            cbt = cbt + 0.2*dcbt
+
+
+        xpred   = get_xpred(cbt,None)
+
+
+        xpred = xpred.matmul(md.lin_internal_output.weight.T).reshape((b,t,nh,ne))
+        x     = xpred
+        x     = self.transformer.ln_f(x)            
+
+        logits= self.lm_head(x).log_softmax(-1).logsumexp(2)-math.log(nh)
+
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss         
+
+
+class CCM05(GPT):
+    '''
+    CCM04 extend the hidden state to have pre and post context 
+    
+    step 1750: train loss 4.0262, val loss 4.9741
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 400
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        # config.n_internal = config.n_embd//16
+        config.n_internal = config.n_embd//4
+
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne  = config.n_embd
+        nh  = config.n_head
+        nei = config.n_internal
+        # config.n_head = 
+        # nh = 4
+        config.nc = 4
+        nc = config.nc
+
+        # config.g = 200
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_query = nn.Linear(config.n_embd,config.k, ),
+            k_vects = nn.Embedding(config.g, ne),
+            v_vects = nn.Embedding(config.g, ne),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_init     = nn.Linear(ne, ne,bias=config.bias),
+            lin_output   = nn.Linear(ne//nc, ne,bias=config.bias),
+            # lin_output_ctx   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne//nc,ne//nc,bias=config.bias),
+            # lin_transit_ctx = nn.Linear(ne,nh*nei,bias=config.bias),
+            lin_cpt_attention = nn.Linear(ne,ne,bias=config.bias),
+            lin_cpt_attention_2 = nn.Linear(ne,ne,bias=config.bias),
+            lin_cpt_attention_3 = nn.Linear(ne,ne,bias=config.bias),
+            # lin_ctx = nn.Linear(ne,ne,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        cpt      = torch.zeros((b,t,e),device=device)  + md.lin_init(x)
+        ### context before 
+        cbt      = torch.zeros((b,t,e),device=device)  + md.lin_init(x)
+        # cpt = torch.normal(0,0.1,size=(b,t,e),device=device)
+        x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+        nc = config.nc
+        def get_xpred(cbt,):
+            ### (b,tp,nh,nei)
+            #### adding a context
+            #### cpt 
+            cbts = cbt.reshape((b,t,nc,ne//nc))
+            # v1,v2 = cbt.split(ne//2,dim=2)
+            xpred = cbts.matmul(md.lin_output.weight.T)
+            # (cbts)
+            return xpred
+
+
+
+        for i in range(6):
+            ### (b,tp,e)
+
+            #### calculate alternative hypotheses w.r.t. the word emission.
+            xpred   = get_xpred(cbt,)
+            # torch.spol
+
+
+            ### (b,tp,nh,tc)
+            lp  = 0.
+            lp += torch.einsum('bpe,hbce->bphc', cpt, cbt[None])
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+
+            ### (b,tc,nc,ne)
+            cbts = cbt.reshape((b,t,nc,ne//nc))
+            cpts = cpt.reshape((b,t,nc,ne//nc))
+            cpts_pred = cbts.matmul(md.lin_transit.weight)
+
+            ### 
+            lp   =0.
+            lpc  = torch.einsum('btce,btce->btc', cbts, cpts)
+            lp   += lpc.sum(-1,keepdim=True) - lpc
+            lp   += torch.einsum('btce,btce->btc',cpts_pred,cpts)            
+            lp   += torch.einsum('btce,bte->btc',get_xpred(cbt),x)
+            att2 = lp.softmax(-1)
+            # att2 = lp
+            # breakpoint()    
+            dcbt = 0.
+            dcbt += torch.einsum('bchp,hbpe->bce',  att, cpt[None])
+            dcbt += torch.einsum('btc,btck->btck',att2, 
+                (x.matmul(md.lin_output.weight).unsqueeze(2) + cpts.matmul(md.lin_transit.weight.T)) 
+                ).reshape((b,t,ne))
+            dcpt = 0.
+            dcpt += (cpts_pred * att2.unsqueeze(-1)).reshape((b,t,ne))
+            # dcpt += 
+
+
+            cpt = cpt + 0.1*dcpt
+            cbt = cbt + 0.1*dcbt
+
+        xpred   = get_xpred(cbt,)
+
+        x     = xpred
+        x     = self.transformer.ln_f(x)            
+
+        logits= self.lm_head(x).log_softmax(-1).logsumexp(2)-math.log(nc)
+
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss         
+
+
+
+import torch.nn as nn
+# class CCM01(nn.Module):
+class CCM06(GPT):
+    '''
+
+calculating the rnn transition to use atttended vector
+
+
+
+iter 1480: loss 4.1011, time 94.83ms, mfu 3.64%
+iter 1490: loss 4.1817, time 94.83ms, mfu 3.65%
+step 1500: train loss 4.1789, val loss 5.0421
+
+step 2000: train loss 4.0252, val loss 5.0605
+
+
+    ### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        config.n_internal = config.n_embd//4
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne = config.n_embd
+        nh = config.n_head
+        nei = config.n_internal
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_output   = nn.Linear(ne, nh*nei,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne,nh*nei,bias=config.bias),
+            log_prior   = nn.Linear(10,2,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+        # cpt = torch.zeros((b,t,e),device=device) 
+        # x        = torch.cat([torch.zeros((b,1,e),device=device),x],dim=1)
+        # t = t+1
+        cpt      = torch.zeros((b,t,e),device=device)+ x
+        # x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+
+        def get_xpred(cpt):
+            ### (b,tp,nh,nei)
+            # xpred = md.lin_output(cpt).sigmoid().reshape((b,t,nh,ne))
+            xpred = md.lin_output(cpt).reshape((b,t,nh,nei))
+            return xpred
+
+
+        def get_cpred(x,cpt):
+            ### (b,tp,nei,nh,tc)
+            ### no skip connection for the momenta
+            cpred = md.lin_transit(cpt).reshape((b,t,nei,nh,1)).expand((b,t,nei,nh,t)) 
+            cpred = cpred + md.lin_input(x).transpose(1,2)[:,None,:,None,:].expand((b,t,nei,nh,t)) 
+            cpred = 0.5 * cpred
+            # cpred = cpred.sigmoid()
+            return cpred
+
+        for i in range(4):
+            xpred = get_xpred(cpt)
+            cpred = get_cpred(x,cpt)
+
+            ### (b,tp,nh,tc)
+            lp = 0.
+            # lp += xpred.matmul(xrep) 
+            lp += torch.einsum('bphe,bce->bphc', xpred, x.matmul(md.lin_internal_output.weight)) 
+            lp += torch.einsum('bpehc,bce->bphc',cpred, cpt.matmul(md.lin_internal.weight))
+
+            ### (b,tc,nh,tp)
+            lp = lp.transpose(1,3)
+            
+            lp = lp.masked_fill(att_mask[None,:,None,:]==0,float('-inf'))
+
+            ### (b,tc,nh,tp)
+            # att = lp.reshape.softmax((2,3))
+            att = lp.reshape((b,t,-1)).softmax(-1).reshape(lp.shape)
+            # 2,3))
+            # breakpoint()    
+            dcpt = torch.einsum('bchp,bpehc->bce', att, cpred).matmul(md.lin_internal.weight.T)
+            # cpt2 = 
+            cpt = cpt + 0.1*dcpt
+
+        # xpred = md.lin_output(dcpt).reshape((b,t,nh,nei))
+        xpred = get_xpred(cpt)
+        xpred = xpred.matmul(md.lin_internal_output.weight.T).reshape((b,t,nh,ne))
+        x     = xpred
+
+        x     = self.transformer.ln_f(x)            
+
+        ###step 1750: train loss 4.5279, val loss 5.3416
+
+        logits= self.lm_head(x).log_softmax(-1)
+        # lprior =  md.log_prior.weight.T[:1,None,:,None].log_softmax(2)
+        # # lprior = 0.
+        # logits = (torch.cat([logits[:,:-1],logits[:,1:]],dim=2)+lprior).logsumexp(2)
+        # logits = torch.cat([logits[:,:-1],logits[:,1:]],dim=2)
+        logits = logits.logsumexp(2)
+
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss         
+
+class CCM06(GPT):
+    '''
+
+calculating the rnn transition to use atttended vector
+
+
+
+iter 1480: loss 4.1011, time 94.83ms, mfu 3.64%
+iter 1490: loss 4.1817, time 94.83ms, mfu 3.65%
+step 1500: train loss 4.1789, val loss 5.0421
+
+step 2000: train loss 4.0252, val loss 5.0605
+
+step 1500: train loss 4.0372, val loss 4.9759
+step 1500: train loss 4.0372, val loss 4.9759
+
+
+1-layer
+
+2-layer
+step 1000: train loss 4.0673, val loss 4.8889
+step 1250: train loss 3.9270, val loss 4.8307
+step 1500: train loss 3.7982, val loss 4.8263
+
+2-layer other initialisation
+step 1000: train loss 4.1762, val loss 4.9463
+step 1250: train loss 4.0637, val loss 4.9493
+step 1500: train loss 3.9368, val loss 4.9163
+step 1750: train loss 3.8000, val loss 4.8896
+
+
+
+gpt01 2-layer
+step 1000: train loss 4.0415, val loss 4.8985
+step 1250: train loss 3.9042, val loss 4.8685
+step 1500: train loss 3.7759, val loss 4.8632
+
+
+
+### maybe overfitting?
+
+    '''
+
+    @classmethod
+    def add_config(cls, config):
+        config.mask_index = -1
+        # config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+
+        config.k = 5
+        config.g = 200
+        # config.g = 10
+        config.nrep=2
+        config.use_dropout = 0
+        ### lower rank for the internal embedding
+        config.n_internal = config.n_embd//4
+
+
+        # config.block_size = config.block_size+config.k
+        # config.block_size = config.block_size*4
+        # config.block_size = config.block_size*2
+        config.method = -1
+        config.n_head = 1
+
+        config.suffix = f'{config.optimizer}-method{config.method}'
+        config.is_causal=True
+        # assert config.method in [5,6,7,8,9,10,11,12,13]
+        assert config.optimizer
+        return config
+
+
+    def __init__(self, config):
+        super(GPT,self).__init__(config)
+
+        # config.block_size = config.block_size*
+
+        config = self.add_config(config)
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+        print(config)
+        # breakpoint()
+        ne = config.n_embd
+        nh = config.n_head
+        nei = config.n_internal
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # k_vects = nn.Embedding(config.g, config.n_embd),
+            # g_vects = nn.Embedding(config.g, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            lin_output   = nn.Linear(ne, ne,bias=config.bias),
+            lin_output_2   = nn.Linear(ne, ne,bias=config.bias),
+            lin_output_3   = nn.Linear(ne, ne,bias=config.bias),
+            lin_internal = nn.Linear(nei, ne,bias=config.bias),
+            lin_internal_output = nn.Linear(nei, ne,bias=config.bias),
+            lin_transit = nn.Linear(ne,nei,bias=config.bias),
+            lin_transit_2 = nn.Linear(ne,ne,bias=config.bias),
+            log_prior   = nn.Linear(10,2,bias=config.bias),
+            # lin_transit_2 = nn.Linear(nh*nei, ne,bias=config.bias),
+            lin_input   = nn.Linear(ne,nei,bias=config.bias),
+            lin_input_2   = nn.Linear(ne,ne,bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.att_bias = 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+
+    def forward(self, idx, targets=None, gradient_only=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        lp_internal = torch.zeros((b,),device=device)
+
+        md = self.transformer ### model dict
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+        # x = tok_emb 
+        if self.config.use_dropout:
+            x = self.transformer.drop(x)
+
+
+        lp_internal = torch.zeros((b,),device=device)
+        #### the problem here is to insert context vector
+        ####
+        e = self.config.n_embd
+        l = self.config.n_layer
+
+        config = self.config
+
+        ne = config.n_embd
+        nh = config.n_head
+
+        ### cpt is the post context at position 
+
+
+        cpt       = (torch.zeros((b,t,e),device=device)+ x)
+        cpt2      = (torch.zeros((b,t,e),device=device)+ x)
+
+        # cpt       = (torch.zeros((b,t,e),device=device)+ pos_emb)
+        # cpt2      = (torch.zeros((b,t,e),device=device)+ pos_emb)
+        
+        
+        # cpt       = (torch.zeros((b,t,e),device=device)+ x.matmul(md.lin_output.weight.T)).detach()
+        # cpt2      = (torch.zeros((b,t,e),device=device)+ md.lin_input_2(cpt)).detach()
+        # x
+        # x_init   = x
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (i,j)  0 for j>i 1 for j<=i  so i is ti, j is tp
+        ### need to concat a single prefix to avoid
+        # att_mask = torch.tril(att_mask, diagonal=1)
+
+        ### (tc,tp)
+        att_mask = torch.tril(att_mask, diagonal=0)
+        nei      = config.n_internal
+        md       = self.transformer
+
+        # ### (tp,tc)        
+        # att_mask = att_mask.T
+
+        def get_xpred(cpt):
+            ### (b,tp,nh,nei)
+            # xpred = md.lin_output(cpt).sigmoid().reshape((b,t,nh,ne))
+            # xpred = md.lin_output(cpt)
+            xpred = cpt.matmul(md.lin_output.weight)
+            return xpred
+
+        def get_cpred(x,cpt):
+            ### (b,tp,nei,tc)
+            ### no skip connection for the momenta
+            cpred = md.lin_transit(cpt).unsqueeze(-1).expand((b,t,nei,t)) 
+            cpred = cpred + md.lin_input(x).transpose(1,2)[:,None,:,:].expand((b,t,nei,t)) 
+            cpred = 0.5 * cpred
+            return cpred
+
+        for i in range(4):
+            xpred = get_xpred(cpt)
+            cpred = get_cpred(x,cpt)
+
+            ### (b,tp,nh,tc)
+            lp = 0.
+            #### gradient to predict the token
+            lp += torch.einsum('bpe,bce ->bcp', xpred,   x)
+            lp += torch.einsum('bpec,bce->bcp', cpred, cpt.matmul(md.lin_internal.weight))
+
+            #### gradient to predict the dependency between context
+            ### (b,tc,tp)
+            lp = lp.masked_fill(att_mask[None,:,:]==0,float('-inf'))
+
+            ### (b,tc,tp)
+            att  = lp.softmax(-1)
+            dcpt = torch.einsum('bcp,bpec->bce', att, cpred).matmul(md.lin_internal.weight.T)
+            cpt  = cpt + 0.1*dcpt
+
+
+            ### (b,tp,nh,nei)
+            cpt_pred = md.lin_output_2(cpt2)
+
+            ### (b,tp,nei,tc)
+            cpt2_pred = md.lin_transit_2(cpt2).unsqueeze(-1) + md.lin_input_2(cpt).transpose(1,2)[:,None,:,:].expand((b,t,ne,t)) 
+            # xpred = get_xpred(cpt)
+            ### (b,tp,nh,tc)
+            lp = 0.
+            #### gradient to predict the token
+            lp += torch.einsum('bpe,bce ->bcp',  cpt_pred,   cpt)
+            lp += torch.einsum('bpec,bce->bcp', cpt2_pred,  cpt2)
+            
+            #### gradient to predict the dependency between context
+            ### (b,tc,tp)
+            lp = lp.masked_fill(att_mask[None,:,:]==0,float('-inf'))
+
+            ### (b,tc,tp)
+            att  = lp.softmax(-1)
+            dcpt2 = torch.einsum('bcp,bpec->bce', att, cpt2_pred)
+            cpt2  = cpt2 + 0.1*dcpt2
+
+        
+
+
+        x     = cpt2.matmul(md.lin_output_3.weight)
+        # print(x.shape)
+
+        x     = self.transformer.ln_f(x)            
+
+        ###step 1750: train loss 4.5279, val loss 5.3416
+
+        logits = self.lm_head(x).log_softmax(-1)
+        # logits = logits.logsumexp(2)
+
+
+        ### (b,t)
+        if targets is not None:
+            loss  = F.cross_entropy(logits.transpose(1,2), targets, ignore_index=-1,reduction='mean')
+        else:
+            loss  = None
+        return logits, loss     
+
+'''
+GPT01
+
+iter 1740: loss 1.1673, time 40.94ms, mfu 9.46%
+step 1750: train loss 1.1054, val loss 1.4680
+saving checkpoint to out-shakespeare-char
+
+
+CM01
+iter 730: loss 0.9343, time 88.90ms, mfu 0.47%
+iter 740: loss 0.8686, time 88.92ms, mfu 0.47%
+step 750: train loss 0.8607, val loss 0.8843
+
+
+CM01
+step 1750: train loss 4.1811, val loss 5.0537
+
+step 1750: train loss 4.2450, val loss 5.0785
+step 2000: train loss 4.1566, val loss 5.0758
+step 2750: train loss 4.0060, val loss 5.0832
+
+'''
+
+GPT = CCM01
+# GPT = CCM02
+# GPT = CCM03
+# GPT = CCM04
+# GPT = CCM05
+# 
+GPT = CCM06
+
+# GPT=GPT

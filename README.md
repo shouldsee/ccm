@@ -20,6 +20,9 @@ python3 sample.py --out_dir=out-shakespeare-word --model=CCM06
 
 ## acknowledgements
 
-Training and sampling scripts come from the nanoGPT 
+Training and sampling scripts are taken from the [nanoGPT](https://github.com/karpathy/nanoGPT) by Andrej Kaparthy
 
-All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.com), my favorite Cloud GPU provider. Thank you Lambda labs for sponsoring nanoGPT!
+
+## Changelog:
+2023-12-14,Feng Geng: implemented CCM06 
+

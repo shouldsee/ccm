@@ -9,7 +9,8 @@ construct that seeks to understand the probabilistic model origin of transformer
 
 ```python
 ### the model is default to 2-layer
-python3 train.py config/train_shakespeare.py --init_from=scratch --compile=True --n_layer=2 --model=CCM06
+### use --model=GPT to compare to nanoGPT
+python3 train.py config/train_shakespeare.py --model=CCM06 --init_from=scratch --compile=True --n_layer=2 
 ```
 
 ### Sample

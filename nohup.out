@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "train.py", line 30, in <module>
+    from model import GPTConfig, GPT
+  File "/root/ccm/model.py", line 35636
+    yinput2= torch.einsum('btk,btke->bte', , int_state) 
+                                           ^
+SyntaxError: invalid syntax
+Traceback (most recent call last):
+  File "train.py", line 30, in <module>
+    from model import GPTConfig, GPT
+  File "/root/ccm/model.py", line 41724
+    kenc(ctx, block0.flayer4.weight)
+    ^
+SyntaxError: invalid syntax

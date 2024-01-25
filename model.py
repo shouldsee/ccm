@@ -31421,6 +31421,9 @@ class CCM110(GPT):
                 '''
 python3 -u train.py config/train_shakespeare.py  --init_from=scratch --compile=True --model=CCM110 --n_layer=6 --n_head=14 --share_layer=True --random_seed=0
 
+python3 -u train.py config/train_shakespeare.py  --init_from=scratch --compile=True --model=CCM110 --n_layer=6 --n_head=14 --share_layer=True --random_seed=0
+
+
                 step 1250: train loss 3.8440, val loss 4.7829
                 '''
                 if not self.config.share_layer:
@@ -88267,18 +88270,11 @@ class CCM305(GPT):
             wte  = nn.Embedding(config.vocab_size, config.n_embd),
             wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
             wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
-            wke  = nn.Embedding(config.g, config.n_embd),
-            wve  = nn.Embedding(config.g, config.n_embd),
-            wge  = nn.Embedding(ng, config.n_embd),
-            wve2  = nn.Embedding(config.g, config.n_embd*ng),
             drop = nn.Dropout(config.dropout),
-            # output = nn.Linear(nc*ne, ne,bias=False),
             output = nn.Linear(ne*(nl+1), ng*ne,bias=False),
             gates = nn.Linear(ne*(nl+1), ng, bias=True),
-            # output2 = nn.Linear(ne, ng*ne,bias=False),
-            # gates2 = nn.Linear(ne, ng, bias=True),
             
-            input = nn.Linear(ne, (ng+1)*ne,bias=False),
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
             # input2 = nn.Linear(ne, (ng)*ne,bias=False),
 
 
@@ -88363,6 +88359,7 @@ class CCM305(GPT):
 
         # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
         kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        # int_state = md.drop(kemb + pos_emb[None,:,None])
         int_state = (kemb + pos_emb[None,:,None])
         int_state = _lnorm(int_state)      
         xtok = int_state[:,:,0]
@@ -88443,10 +88440,7 @@ class CCM305(GPT):
         device = self.lm_head.weight.device
         nl = self.config.n_layer
 
-        # device = idx.device
-        # b, t = idx.size()
-        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
 
 
         import matplotlib; matplotlib.use('agg')
@@ -89360,10 +89354,10 @@ class CCM310(GPT):
             wte  = nn.Embedding(config.vocab_size, config.n_embd),
             wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
             wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
-            wke  = nn.Embedding(config.g, config.n_embd),
-            wve  = nn.Embedding(config.g, config.n_embd),
-            wge  = nn.Embedding(ng, config.n_embd),
-            wve2  = nn.Embedding(config.g, config.n_embd*ng),
+            # wke  = nn.Embedding(config.g, config.n_embd),
+            # wve  = nn.Embedding(con/fig.g, config.n_embd),
+            # wge  = nn.Embedding(ng, config.n_embd),
+            # wve2  = nn.Embedding(config.g, config.n_embd*ng),
             drop = nn.Dropout(config.dropout),
             # output = nn.Linear(nc*ne, ne,bias=False),
             output = nn.Linear(ne*(nl+1), ng*ne,bias=False),
@@ -89371,7 +89365,7 @@ class CCM310(GPT):
             # output2 = nn.Linear(ne, ng*ne,bias=False),
             # gates2 = nn.Linear(ne, ng, bias=True),
             
-            input = nn.Linear(ne, (ng+1)*ne,bias=False),
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
             # input2 = nn.Linear(ne, (ng)*ne,bias=False),
 
 
@@ -89455,10 +89449,10 @@ class CCM310(GPT):
         block0 = self.transformer.h[0]
 
         # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
-        kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        kemb      = md.input(tok_emb).reshape((b,t,-1,ne))
         int_state = (kemb + pos_emb[None,:,None])
         int_state = _lnorm(int_state)      
-        xtok = int_state[:,:,0]
+        xtok      = int_state[:,:,0]
         int_state = int_state[:,:,1:]
 
 
@@ -90577,3 +90571,1926 @@ class CCM315(GPT):
 
         pass
 
+
+
+
+
+class CCM316(GPT):
+    '''
+
+python3 -u train.py config/train_novel.py  --init_from=scratch --compile=True --model=CCM316 --n_layer=2 --n_head=16 --share_layer=True --random_seed=0
+
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            # wke  = nn.Embedding(config.g, config.n_embd),
+            # wve  = nn.Embedding(config.g, config.n_embd),
+            # wge  = nn.Embedding(ng, config.n_embd),
+            # wve2  = nn.Embedding(config.g, config.n_embd*ng),
+            drop = nn.Dropout(config.dropout),
+            # output = nn.Linear(nc*ne, ne,bias=False),
+            output = nn.Linear(ng,ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            # output2 = nn.Linear(ne, ng*ne,bias=False),
+            # gates2 = nn.Linear(ne, ng, bias=True),
+            
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
+            # input2 = nn.Linear(ne, (ng)*ne,bias=False),
+
+
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            # fout = nn.Linear(ne*(nc)*20,    ne,bias=False),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+        
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,2),device=device).long() 
+            + torch.arange(2,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        # print([t],att_mask.shape)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                dx1    = xtok
+                wk     = block0.k_attn_1.weight.T
+                xq     = dx1.matmul(wk)
+                xq     = lnorm(xq)
+                engp   = torch.einsum('bte,bpke->btpk',xq , int_state)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t,None] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1).reshape((engp.shape))
+                yinput = torch.einsum('btpk,bpke->bte', att, int_state)
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T)
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                int_states[:,:,layer_i+1] = int_state[:,:,0] 
+                
+                if not self.training and not self.config.compile:
+                    if layer_i ==0:
+                        print()
+
+
+        x = int_states[:,:,:]
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x).sigmoid()
+        x = md.output((att))
+        # x     = torch.einsum('btk,btke->bte',att, md.output(x).reshape((b,t,ng,-1)))
+        x = _lnorm(x)
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  
+
+
+    def plot(self,fn):
+
+        md = self.transformer
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+        device = self.lm_head.weight.device
+        nl = self.config.n_layer
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        import matplotlib; matplotlib.use('agg')
+        import matplotlib.pyplot as plt
+        # import 
+        with open(fn,'w') as f:
+            
+            fig, axs = plt.subplots(1,2,figsize=[8,8])
+            axi = -1
+            axs=axs.ravel()
+            axi+=1;ax = axs[axi]
+            # out = np.zeros((nl,ng))
+            x = md.output.weight.T.reshape(((1+nl),ne,-1,ne))
+            x = x.square().mean((1,3))
+            x = x.cpu().detach().numpy()
+            out = x
+            
+            # im = ax.pcolormesh(out,vmin=out.min(),vmax=None)
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            im = ax.pcolormesh(out)
+            plt.colorbar(im)
+
+            axi+=1;ax = axs[axi]
+            x = md.gates.weight.T.reshape(((1+nl),ne,-1,))
+            x = x.square().mean((1,))
+            x = x.cpu().detach().numpy()
+            im = ax.pcolormesh(x)
+            plt.sca(ax)
+            plt.title('gates')
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            plt.colorbar(im)
+            plt.savefig(fn+'.png')
+            plt.close()
+            # ax.heatma
+
+        pass
+
+
+
+
+class CCM317(GPT):
+    '''
+
+python3 -u train.py config/train_novel.py  --init_from=scratch --compile=True --model=CCM316 --n_layer=2 --n_head=16 --share_layer=True --random_seed=0
+
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            # wke  = nn.Embedding(config.g, config.n_embd),
+            # wve  = nn.Embedding(config.g, config.n_embd),
+            # wge  = nn.Embedding(ng, config.n_embd),
+            # wve2  = nn.Embedding(config.g, config.n_embd*ng),
+            drop = nn.Dropout(config.dropout),
+            # output = nn.Linear(nc*ne, ne,bias=False),
+            output = nn.Linear(ng,ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            # output2 = nn.Linear(ne, ng*ne,bias=False),
+            # gates2 = nn.Linear(ne, ng, bias=True),
+            
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
+            # input2 = nn.Linear(ne, (ng)*ne,bias=False),
+
+
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            # fout = nn.Linear(ne*(nc)*20,    ne,bias=False),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+        
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,2),device=device).long() 
+            + torch.arange(2,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        # print([t],att_mask.shape)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                dx1    = xtok
+                wk     = block0.k_attn_1.weight.T
+                xq     = dx1.matmul(wk)
+                xq     = lnorm(xq)
+                engp   = torch.einsum('bte,bpke->btpk',xq , int_state)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t,None] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1).reshape((engp.shape))
+                yinput = torch.einsum('btpk,bpke->bte', att, int_state)
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T)
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                # int_states[:,:,layer_i+1] = int_state[:,:,0] 
+                int_states[:,:,layer_i+1] = yinput
+                
+                if not self.training and not self.config.compile:
+                    if layer_i ==0:
+                        print()
+
+
+        x = int_states[:,:,:]
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x).sigmoid()
+        x = md.output((att))
+        # x     = torch.einsum('btk,btke->bte',att, md.output(x).reshape((b,t,ng,-1)))
+        x = _lnorm(x)
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  
+
+
+    def plot(self,fn):
+
+        md = self.transformer
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+        device = self.lm_head.weight.device
+        nl = self.config.n_layer
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        import matplotlib; matplotlib.use('agg')
+        import matplotlib.pyplot as plt
+        # import 
+        with open(fn,'w') as f:
+            
+            fig, axs = plt.subplots(1,2,figsize=[8,8])
+            axi = -1
+            axs=axs.ravel()
+            axi+=1;ax = axs[axi]
+            # out = np.zeros((nl,ng))
+            x = md.output.weight.T.reshape(((1+nl),ne,-1,ne))
+            x = x.square().mean((1,3))
+            x = x.cpu().detach().numpy()
+            out = x
+            
+            # im = ax.pcolormesh(out,vmin=out.min(),vmax=None)
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            im = ax.pcolormesh(out)
+            plt.colorbar(im)
+
+            axi+=1;ax = axs[axi]
+            x = md.gates.weight.T.reshape(((1+nl),ne,-1,))
+            x = x.square().mean((1,))
+            x = x.cpu().detach().numpy()
+            im = ax.pcolormesh(x)
+            plt.sca(ax)
+            plt.title('gates')
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            plt.colorbar(im)
+            plt.savefig(fn+'.png')
+            plt.close()
+            # ax.heatma
+
+        pass
+
+
+
+
+class CCM318(GPT):
+    '''
+
+python3 -u train.py config/train_novel.py  --init_from=scratch --compile=True --model=CCM316 --n_layer=2 --n_head=16 --share_layer=True --random_seed=0
+
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            output = nn.Linear(ng,ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    attn = nn.Linear(ng,ne,bias=False),
+                    gates = nn.Linear(ne, ng, bias=True),
+
+                    # k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+        
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,2),device=device).long() 
+            + torch.arange(2,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        # print([t],att_mask.shape)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                # dx1    = xtok
+                # wk     = block0.k_attn_1.weight.T
+                # xq     = dx1.matmul(wk)
+                # xq     = lnorm(xq)
+
+                xq = block0.attn( block0.gates(int_state[:,:,0]).sigmoid())
+                xq = _lnorm(xq)
+
+                engp   = torch.einsum('bpe,bte->btp', xq , xtok)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1)
+                yinput = torch.einsum('btp,bpe->bte', att, int_state[:,:,0])
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T)
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                int_states[:,:,layer_i+1] = int_state[:,:,0] 
+                
+                if not self.training and not self.config.compile:
+                    if layer_i ==0:
+                        print()
+
+
+        x = int_states[:,:,:]
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x).sigmoid()
+        x = md.output((att))
+        # x     = torch.einsum('btk,btke->bte',att, md.output(x).reshape((b,t,ng,-1)))
+        x = _lnorm(x)
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  
+
+
+    def plot(self,fn):
+
+        md = self.transformer
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+        device = self.lm_head.weight.device
+        nl = self.config.n_layer
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        import matplotlib; matplotlib.use('agg')
+        import matplotlib.pyplot as plt
+        # import 
+        with open(fn,'w') as f:
+            
+            fig, axs = plt.subplots(1,2,figsize=[8,8])
+            axi = -1
+            axs=axs.ravel()
+            axi+=1;ax = axs[axi]
+            # out = np.zeros((nl,ng))
+            x = md.output.weight.T.reshape(((1+nl),ne,-1,ne))
+            x = x.square().mean((1,3))
+            x = x.cpu().detach().numpy()
+            out = x
+            
+            # im = ax.pcolormesh(out,vmin=out.min(),vmax=None)
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            im = ax.pcolormesh(out)
+            plt.colorbar(im)
+
+            axi+=1;ax = axs[axi]
+            x = md.gates.weight.T.reshape(((1+nl),ne,-1,))
+            x = x.square().mean((1,))
+            x = x.cpu().detach().numpy()
+            im = ax.pcolormesh(x)
+            plt.sca(ax)
+            plt.title('gates')
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            plt.colorbar(im)
+            plt.savefig(fn+'.png')
+            plt.close()
+            # ax.heatma
+
+        pass
+
+
+
+
+class CCM319(GPT):
+    '''
+
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM305_77dab28cd464181bb1f3b13f28b44de4 --model=CCM305
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM305_eefe4dee4010be5f6c27e285df74025b --model=CCM305
+
+python3 -u train.py config/train_novel.py  --init_from=scratch --compile=True --model=CCM316 --n_layer=2 --n_head=16 --share_layer=True --random_seed=0
+
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            # wke  = nn.Embedding(config.g, config.n_embd),
+            # wve  = nn.Embedding(config.g, config.n_embd),
+            # wge  = nn.Embedding(ng, config.n_embd),
+            # wve2  = nn.Embedding(config.g, config.n_embd*ng),
+            drop = nn.Dropout(config.dropout),
+            # output = nn.Linear(nc*ne, ne,bias=False),
+            output = nn.Linear(ng,ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            # output2 = nn.Linear(ne, ng*ne,bias=False),
+            # gates2 = nn.Linear(ne, ng, bias=True),
+            
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
+            # input2 = nn.Linear(ne, (ng)*ne,bias=False),
+
+
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                    output = nn.Linear(ng,ne,bias=False),
+                    gates = nn.Linear(ne*(1), ng, bias=True),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            # fout = nn.Linear(ne*(nc)*20,    ne,bias=False),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+        
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,2),device=device).long() 
+            + torch.arange(2,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        # print([t],att_mask.shape)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                # xq = block0.attn( block0.gates(int_state[:,:,0]).sigmoid())
+                # xq = _lnorm(xq)
+
+
+
+                dx1    = xtok
+                wk     = block0.k_attn_1.weight.T
+                xq     = dx1.matmul(wk)
+                xq     = lnorm(xq)
+                engp   = torch.einsum('bpe,bte->btp', xq , xtok)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1)
+                yinput = torch.einsum('btp,bpe->bte', att, int_state[:,:,0])
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T)
+                # yo1 = block0.outputer( block0.gates(int_state[:,:,0]).sigmoid())
+                yo1 = block0.output( block0.gates(yo1).sigmoid())
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                int_states[:,:,layer_i+1] = int_state[:,:,0] 
+                
+                if not self.training and not self.config.compile:
+                    if layer_i ==0:
+                        print()
+
+
+        x = int_states[:,:,:]
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x).sigmoid()
+        x = md.output((att))
+        # x     = torch.einsum('btk,btke->bte',att, md.output(x).reshape((b,t,ng,-1)))
+        x = _lnorm(x)
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  
+
+
+    def plot(self,fn):
+
+        md = self.transformer
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+        device = self.lm_head.weight.device
+        nl = self.config.n_layer
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        import matplotlib; matplotlib.use('agg')
+        import matplotlib.pyplot as plt
+        # import 
+        with open(fn,'w') as f:
+            
+            fig, axs = plt.subplots(1,2,figsize=[8,8])
+            axi = -1
+            axs=axs.ravel()
+            axi+=1;ax = axs[axi]
+            # out = np.zeros((nl,ng))
+            x = md.output.weight.T.reshape(((1+nl),ne,-1,ne))
+            x = x.square().mean((1,3))
+            x = x.cpu().detach().numpy()
+            out = x
+            
+            # im = ax.pcolormesh(out,vmin=out.min(),vmax=None)
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            im = ax.pcolormesh(out)
+            plt.colorbar(im)
+
+            axi+=1;ax = axs[axi]
+            x = md.gates.weight.T.reshape(((1+nl),ne,-1,))
+            x = x.square().mean((1,))
+            x = x.cpu().detach().numpy()
+            im = ax.pcolormesh(x)
+            plt.sca(ax)
+            plt.title('gates')
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            plt.colorbar(im)
+            plt.savefig(fn+'.png')
+            plt.close()
+            # ax.heatma
+
+        pass
+
+
+
+class CCM320(GPT):
+    '''
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+        nk = 200
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            wke  = nn.Embedding(config.g, config.n_embd),
+            wve  = nn.Embedding(config.g, config.n_embd),
+            wge  = nn.Embedding(ng, config.n_embd),
+            wve2  = nn.Embedding(config.g, config.n_embd*ng),
+            drop = nn.Dropout(config.dropout),
+            # output = nn.Linear(nc*ne, ne,bias=False),
+            output = nn.Linear(ne*(nl+1), ng*ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            # output2 = nn.Linear(ne, ng*ne,bias=False),
+            # gates2 = nn.Linear(ne, ng, bias=True),
+            
+            input = nn.Linear(ne, (ng+1)*ne,bias=False),
+            # input2 = nn.Linear(ne, (ng)*ne,bias=False),
+
+
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                    gates = nn.Linear(ne, nk,bias=True),
+                    dz = nn.Linear(nk,ne,bias=False),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            # fout = nn.Linear(ne*(nc)*20,    ne,bias=False),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,ng),device=device).long() 
+            + torch.arange(ng,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                dx1    = xtok
+                wk     = block0.k_attn_1.weight.T
+                xq     = dx1.matmul(wk)
+                xq     = lnorm(xq)
+                engp   = torch.einsum('bte,bpke->btpk',xq , int_state)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t,None] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1).reshape((engp.shape))
+                yinput = torch.einsum('btpk,bpke->bte', att, int_state)
+                dz = block0.dz(block0.gates(yinput).sigmoid())
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T) + dz
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                int_states[:,:,layer_i+1] = int_state[:,:,0] 
+                
+                if not self.training and not self.config.compile:
+                    if layer_i ==0:
+                        print()
+
+
+        x = int_states[:,:,:]
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x).softmax(-1)
+        x     = torch.einsum('btk,btke->bte',att, md.output(x).reshape((b,t,ng,-1)))
+        x = _lnorm(x)
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  
+
+
+    def plot(self,fn):
+
+        md = self.transformer
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+        device = self.lm_head.weight.device
+        nl = self.config.n_layer
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        import matplotlib; matplotlib.use('agg')
+        import matplotlib.pyplot as plt
+        # import 
+        with open(fn,'w') as f:
+            
+            fig, axs = plt.subplots(1,2,figsize=[8,8])
+            axi = -1
+            axs=axs.ravel()
+            axi+=1;ax = axs[axi]
+            # out = np.zeros((nl,ng))
+            x = md.output.weight.T.reshape(((1+nl),ne,-1,ne))
+            x = x.square().mean((1,3))
+            x = x.cpu().detach().numpy()
+            out = x
+            
+            # im = ax.pcolormesh(out,vmin=out.min(),vmax=None)
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            im = ax.pcolormesh(out)
+            plt.colorbar(im)
+
+            axi+=1;ax = axs[axi]
+            x = md.gates.weight.T.reshape(((1+nl),ne,-1,))
+            x = x.square().mean((1,))
+            x = x.cpu().detach().numpy()
+            im = ax.pcolormesh(x)
+            plt.sca(ax)
+            plt.title('gates')
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            plt.colorbar(im)
+            plt.savefig(fn+'.png')
+            plt.close()
+            # ax.heatma
+
+        pass
+
+
+
+
+
+class CCM321(GPT):
+    '''
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            output = nn.Linear(ne*(nl+1), ng*ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
+            input2 = nn.Linear(ne, (1+nl)*ne,bias=False),
+
+
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            # fout = nn.Linear(ne*(nc)*20,    ne,bias=False),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,ng),device=device).long() 
+            + torch.arange(ng,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb      = md.input(tok_emb).reshape((b,t,-1,ne))
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok      = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                dx1    = xtok
+                wk     = block0.k_attn_1.weight.T
+                xq     = dx1.matmul(wk)
+                xq     = lnorm(xq)
+                engp   = torch.einsum('bte,bpke->btpk',xq , int_state)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t,None] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1).reshape((engp.shape))
+                yinput = torch.einsum('btpk,bpke->bte', att, int_state)
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T)
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                int_states[:,:,layer_i+1] = _lnorm(yinput)
+                
+                if not self.training and not self.config.compile:
+                    if layer_i ==0:
+                        print()
+
+
+        x = int_states[:,:,:]
+        x = x +  md.input2(tok_emb).reshape((b,t,-1,ne))
+        int_states = _lnorm(int_states)
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x).softmax(-1)
+        x     = torch.einsum('btk,btke->bte',att, md.output(x).reshape((b,t,ng,-1)))
+        x = _lnorm(x)
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  
+
+
+
+class CCM322(GPT):
+    '''
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            output = nn.Linear(ne*(nl+1), ng*ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
+            # input2 = nn.Linear(ne, (ng)*ne,bias=False),
+
+
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            # fout = nn.Linear(ne*(nc)*20,    ne,bias=False),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,ng),device=device).long() 
+            + torch.arange(ng,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb = md.input(tok_emb).reshape((b,t,-1,ne))
+        # int_state = md.drop(kemb + pos_emb[None,:,None])
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                dx1    = xtok
+                wk     = block0.k_attn_1.weight.T
+                xq     = dx1.matmul(wk)
+                xq     = lnorm(xq)
+                engp   = torch.einsum('bte,bpke->btpk',xq , int_state)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t,None] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1).reshape((engp.shape))
+                yinput = torch.einsum('btpk,bpke->bte', att, int_state)
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T)
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                int_states[:,:,layer_i+1] = int_state[:,:,0] 
+                
+                if not self.training and not self.config.compile:
+                    if layer_i ==0:
+                        print()
+
+
+        x = int_states[:,:,:]
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x).sigmoid()
+        x     = torch.einsum('btk,btke->bte',att, md.output(x).reshape((b,t,ng,-1)))
+        x = _lnorm(x)
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  
+
+
+    def plot(self,fn):
+
+        md = self.transformer
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+        device = self.lm_head.weight.device
+        nl = self.config.n_layer
+
+
+
+
+        import matplotlib; matplotlib.use('agg')
+        import matplotlib.pyplot as plt
+        # import 
+        with open(fn,'w') as f:
+            
+            fig, axs = plt.subplots(1,2,figsize=[8,8])
+            axi = -1
+            axs=axs.ravel()
+            axi+=1;ax = axs[axi]
+            # out = np.zeros((nl,ng))
+            x = md.output.weight.T.reshape(((1+nl),ne,-1,ne))
+            x = x.square().mean((1,3))
+            x = x.cpu().detach().numpy()
+            out = x
+            
+            # im = ax.pcolormesh(out,vmin=out.min(),vmax=None)
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            im = ax.pcolormesh(out)
+            plt.colorbar(im)
+
+            axi+=1;ax = axs[axi]
+            x = md.gates.weight.T.reshape(((1+nl),ne,-1,))
+            x = x.square().mean((1,))
+            x = x.cpu().detach().numpy()
+            im = ax.pcolormesh(x)
+            plt.sca(ax)
+            plt.title('gates')
+            # im = ax.pcolormesh(out,vmin=0,vmax=None)
+            plt.colorbar(im)
+            plt.savefig(fn+'.png')
+            plt.close()
+            # ax.heatma
+
+        pass
+
+
+
+
+
+class CCM322(GPT):
+    '''
+    ccm170 but disabled update to control units. more strongly disabled
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config.optimizer ='rmsprop'
+        config.optimizer ='adamw'
+        # config.optimizer ='adam'
+        self.config = config
+        pad = 20
+        # config.block_size = config.block_size + pad
+        config.g = 100
+        nl = config.n_layer
+        ne = config.n_embd
+        config.ng = config.n_head
+        # config.share_layer = False
+        ng = config.ng
+        nh = config.n_head
+        nc = 1
+
+
+        
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe  = nn.Embedding(config.block_size + pad, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size + pad, config.n_embd),
+            # wke  = nn.Embedding(config.g, config.n_embd),
+            # wve  = nn.Embedding(con/fig.g, config.n_embd),
+            # wge  = nn.Embedding(ng, config.n_embd),
+            # wve2  = nn.Embedding(config.g, config.n_embd*ng),
+            drop = nn.Dropout(config.dropout),
+            # output = nn.Linear(nc*ne, ne,bias=False),
+            output = nn.Linear(ne*(nl+1), ng*ne,bias=False),
+            gates = nn.Linear(ne*(nl+1), ng, bias=True),
+            # output2 = nn.Linear(ne, ng*ne,bias=False),
+            # gates2 = nn.Linear(ne, ng, bias=True),
+            
+            input = nn.Linear(ne, (1+1)*ne,bias=False),
+            # input2 = nn.Linear(ne, (ng)*ne,bias=False),
+
+
+            h = nn.ModuleList([ nn.ModuleDict(
+                dict(
+                    k_attn_1 = nn.Linear(ne, ne,bias=False),
+                    k_attn_1b = nn.Linear(ne, ne,bias=False),
+                )
+                ) for _ in range(config.n_layer if not config.share_layer else 1) 
+                ]),
+            # fout = nn.Linear(ne*(nc)*20,    ne,bias=False),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                # torch.nn.init.normal_(p, mean=0.0, std=1)
+                # //math.sqrt(2 * config.n_layer))
+
+
+
+    def forward(self, idx, targets=None):
+
+
+
+        g  = self.config.g
+        ng = self.config.ng
+        e  = self.config.n_embd
+        ne = self.config.n_embd
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+
+        def kenc(ctx, weight):
+            yout = torch.einsum('btf,kfe->btke', ctx,weight.reshape((ng,-1,e)))
+            return yout
+
+        pad = 0
+
+        lreg = 0.
+        lreg_factor = 0.0
+
+
+        tok_emb   = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb   = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # pos_emb[:pad]= pos_emb_2[:pad]
+
+        ### init internal embedding
+        ### ng is the number of internal vectors
+        int_emb     = self.transformer.wpe2(torch.zeros((b,t,ng),device=device).long() 
+            + torch.arange(ng,device=device)[None,None,])
+
+        t = t + pad
+        x = (tok_emb + pos_emb)
+        
+        
+        att_mask = torch.ones((t,t),device=device).bool()
+        ### (tc,tp)
+        att_mask      = torch.tril(att_mask, diagonal=0)
+        att_mask[0,0] =True
+
+
+        md = self.transformer
+        dx    = 0.
+        nstep = 1
+
+        nl = self.config.n_layer
+        nh = self.config.n_head
+
+        dx = 0.
+        block0 = self.transformer.h[0]
+
+        # int_state = self.transformer.drop(md.input(tok_emb).reshape((b,t,-1,ne)) + pos_emb[None,:,None])
+        kemb      = md.input(tok_emb).reshape((b,t,-1,ne))
+        int_state = (kemb + pos_emb[None,:,None])
+        int_state = _lnorm(int_state)      
+        xtok      = int_state[:,:,0]
+        int_state = int_state[:,:,1:]
+
+
+  
+        def lnorm(x):
+            x = x/(0.001+x.std(-1,keepdim=True))
+            return x
+
+        int_states = torch.zeros((b,t,nl+1,e),device=device)
+        int_states[:,:,0] = int_state[:,:,0]
+
+        for ii in range(1):
+
+            for layer_i in range(nl):                
+                if not self.config.share_layer:
+                    ### variable layer
+                    block0 = self.transformer.h[layer_i]
+                else:
+                    ### constant layer
+                    block0 = self.transformer.h[0]
+
+                dx1    = xtok
+                wk     = block0.k_attn_1.weight.T
+                xq     = dx1.matmul(wk)
+                xq     = lnorm(xq)
+                engp   = torch.einsum('bte,bpke->btpk',xq , int_state)  / (ne ** 0.5)
+                engp   = engp.masked_fill(att_mask[None,:t,:t,None] == 0, float('-inf'))
+                att    = engp.reshape((b,t,-1)).softmax(-1).reshape((engp.shape))
+                yinput = torch.einsum('btpk,bpke->bte', att, int_state)
+                yo1 = yinput + xtok.matmul(block0.k_attn_1b.weight.T)
+
+                int_state = torch.stack([yo1,],dim=2)
+
+                int_state = _lnorm(int_state)
+                int_states[:,:,layer_i+1] = _lnorm(yinput)
+                
+                # if not self.training and not self.config.compile:
+                #     if layer_i ==0:
+                #         print()
+
+
+        x = int_states[:,:,:]
+
+        ### btk
+        x     = x.reshape((b,t,-1))
+        att   = md.gates(x)
+        att = att / (ne ** 0.5)
+        # att = att * (ne ** 0.5)
+        att   = att.log_softmax(-1)
+        outs =  md.output(x).reshape((b,t,ng,-1))
+        # x     = torch.einsum('btk,btke->bte',att, outs)
+        # x = _lnorm(outs)
+        x  = outs
+
+        x = self.transformer.ln_f(x)                
+        x = x[:,pad:]
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            targetss = targets.unsqueeze(-1).expand((b,t,ng))
+            lps = att
+            loss = F.cross_entropy( logits.view(-1, logits.size(-1)), targetss.reshape(-1), ignore_index=-1,reduction='none').reshape((targetss.shape))
+            loss = -((-loss + lps).logsumexp(-1)).mean()
+            
+            if self.training:
+                loss = loss + lreg_factor*lreg
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss  

@@ -21,6 +21,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+import traceback
 
 import numpy as np
 import torch
@@ -46,10 +47,12 @@ wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
+optimizer='adamw'
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
+best_val_loss_force = 0.
 # model
 n_layer = 12
 n_head = 12
@@ -151,6 +154,7 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
     share_layer=share_layer,
     random_seed=random_seed,
     compile = compile,
+    optimizer=optimizer,
                 bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 import json
 model_args_cp = model_args.copy()
@@ -189,7 +193,12 @@ elif init_from == 'resume':
     for k,v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    # if model.__class__ in [_model.GPT42G2,_model.GPT42H]:
+    #     model.load_state_dict(state_dict,strict=False)
+    # else:
+    if 1:
+        # model.load_state_dict(state_dict,strict=True)
+        model.load_state_dict(state_dict,strict=False)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
 elif init_from.startswith('gpt2'):
@@ -200,6 +209,8 @@ elif init_from.startswith('gpt2'):
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
+if int(best_val_loss_force)!=0:
+    best_val_loss = best_val_loss_force
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
@@ -212,7 +223,14 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
-    optimizer.load_state_dict(checkpoint['optimizer'])
+    try:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+    except Exception as e:
+        # print(e)
+        print(traceback.format_exc())
+        print('[ignore]skipping restoring optimizer')
+        # optimizer.load_state_dict(checkpoint['optimizer'],strict=False)
+
 checkpoint = None # free up memory
 
 # compile the model
@@ -286,6 +304,7 @@ while True:
                 "mfu": running_mfu*100, # convert to percentage
             })
         if losses['val'] < best_val_loss or always_save_checkpoint:
+        # if (losses['val'] < best_val_loss and losses['val']>0.) or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
                 checkpoint = {

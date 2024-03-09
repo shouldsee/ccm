@@ -130742,6 +130742,21 @@ class Block172(nn.Module):
 
 
 
+
+    # def __init__(self, config, vmax = None,bsize=None):
+    #     super(GPT,self).__init__()
+
+    #     if vmax is None:
+
+    #         assert config.vocab_size is not None
+    #         vmax = config.vocab_size
+    #     if bsize is None:
+    #         assert config.block_size is not None
+    #         bsize = config.block_size
+    #     self.config = config = copy.copy(config)
+    #     config.vocab_size = vmax
+    #     config.block_size= bsize
+
 class GPT172(GPT):
     '''
     same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.

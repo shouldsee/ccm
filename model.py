@@ -209,10 +209,50 @@ class GPTProto(nn.Module):
         else:
             self._stats[k] = v.detach().cpu()
 
+
+    @staticmethod
+    def add_sample_interface(env,gr):
+        '''
+        Adding a sampling interface for the model
+        
+        '''
+        xvar = gr.State([])
+        with gr.Row() as row:
+            with gr.Column():
+                model_name = gr.Textbox(label='model_name', value=env.model.__class__.__name__)
+                c_temp = gr.Number(label='temperature',value=0.8)
+                c_topk = gr.Number(label='topk',value=200,precision=0)
+                c_max_token = gr.Number(label='max token',value=200,precision=0)
+            with gr.Column():
+                input_text = gr.Textbox(
+                    label="input_text ( model.text_generate )",
+                    value="(input text here)"
+                )
+                output_text = gr.Textbox(
+                    label="output_text",
+                    value="(input text here)"
+                )
+                btn = gr.Button("generate")
+
+        def generate(input_text, c_temp, c_topk, c_max_token, var):
+            enc_text = env.encode(input_text)
+            ret = env.model.text_generate(enc_text, temperature=c_temp, top_k=(c_topk), max_new_tokens= (c_max_token))
+            ret = env.decode(ret)
+            return ret
+
+
+        btn.click(
+            generate, 
+            [input_text,c_temp,c_topk, c_max_token, xvar],
+            output_text
+            )
+        return
+
 class GPTSub(GPTProto):
 
     # is_add_stats = False
             
+
 
     def __init__(self, config):
         super().__init__()
@@ -511,11 +551,11 @@ class GPT(GPTProto):
 
         return idx
 
-    def text_generate(self, enc_text, max_new_tokens, temperature=1.0, top_k=None,):
+    def text_generate(self, enc_text, max_new_tokens, temperature=1.0, top_k=None,**kw):
 
         x = (torch.tensor(enc_text, dtype=torch.long, device = self.lm_head.weight.device)[None, ...])
 
-        y = self.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+        y = self.generate(x, max_new_tokens, temperature=temperature, top_k=top_k,**kw)
 
         return (y[0].tolist())
 
@@ -19118,6 +19158,7 @@ class GPT248K(GPT):
         return logits, loss       
 
 
+
 class GPT248N(GPT):
     '''
     same as 248K but using 6 5-length vectors 
@@ -19243,8 +19284,6 @@ class GPT248N(GPT):
         # ns = 10
         # ns = 6
         # x = x[None].repeat((ns,1,1,1)).reshape((-1,x.shape[1],x.shape[2]))
-
-
 
         x0 = x
         ### calculate the last memory context vectors
@@ -19392,7 +19431,4416 @@ class GPT248N(GPT):
                 # pass
             
 
+
+
         return logits, loss       
+
+
+
+class LGT002(GPT):
+    '''
+    LGT: latent generative transformer
+
+    same as LGT001 but with a learnable prior
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        config.nm = nm = 6
+        self.nm = nm 
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = nm_a = 5 ### R2
+        self.nsep  = nsep = 50
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            prior = nn.Linear(nm_a*nm,nsep,bias=False),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item(), self.prior_logsigma.exp().item(), self.post_logsigma.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # ns = 3
+        # ns = 6
+        ns = self.ns
+        nm = self.nm
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        # t = t + nm
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x1 = x
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = -3.0
+        high = 3.0
+        nsep = self.nsep
+        
+        sep = (high - low)/nsep
+
+        ### quantised variable
+        xz_int = (xz.clip(low,high-0.0001) - low)//sep
+        xz_noise_new = (xz_int)*sep + low
+
+
+        lprior = self.transformer.prior.weight.T.log_softmax(1).reshape(-1,1)
+        ### bt        
+        lpz = torch.eye(nsep,device=x.device)[xz_int.long()].reshape(ns*b,-1).matmul(lprior)
+
+        # lpz = math.log(1./nsep) + torch.zeros_like(xz_noise)
+        # lpz = lpz.sum(-1)
+
+
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        
+        ## b,t
+        ### gradient of log_p encoder: q(e_y|d)
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+        ### resampled representation q( z|d )
+        xz_noise = (xz_noise_new - xz).detach() + xz + (torch.rand_like(xz)-0.5)*sep
+        
+
+        prefix = self.transformer.comp_out(xz_noise)
+        _disabled = 0
+        _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            # v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # v,_=torch.histogram((xz_int).cpu().float(), torch.linspace(-1,nsep+1,nsep))
+            # v,_=torch.histogram((xz_noise_new.square().mean(-1)).cpu().float(), torch.linspace(-1,nsep+1,nsep))
+            v,_=torch.histogram((xz_noise_new.square().mean(-1)).cpu().float(), torch.linspace(-1, 5.,20))
+            # print(xz.max(),xz.min())
+
+
+
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            print(v)
+
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        # lpz = lpz.reshape(ns,-1,nm).sum(-1)
+        lpz = lpz.reshape(ns,-1)
+        # ,nm).sum(-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+
+        if not self.training:
+
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz
+            # loss = lpy
+            loss = -loss.mean() / t
+
+        else:
+            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            loss = lpy + lpz + lpe
+            loss = -loss.mean() / t
+
+        return logits, loss       
+
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+
+        _disabled = 0
+        # _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ## [IMP] test whether memory slot is passing information
+            # tok_emb = torch.cat([torch.zeros_like(prefix) + prefix.mean((0,1),keepdims=True), tok_emb],dim=1)
+            tok_emb = torch.cat([torch.flip(prefix,(0,)), tok_emb],dim=1)
+        else:
+            tok_emb = torch.cat([prefix, tok_emb],dim=1)
+        # lprior = 
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+
+        x = self.transformer.ln_f(x)
+
+
+        logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpy = -loss.reshape((ns,-1,t)).sum(-1)        
+        return logits,lpy
+
+
+
+
+    # def __init__(self, config, vmax = None,bsize=None):
+    #     super(GPT,self).__init__()
+
+    #     if vmax is None:
+
+    #         assert config.vocab_size is not None
+    #         vmax = config.vocab_size
+    #     if bsize is None:
+    #         assert config.block_size is not None
+    #         bsize = config.block_size
+    #     self.config = config = copy.copy(config)
+    #     config.vocab_size = vmax
+    #     config.block_size= bsize
+
+
+class GPT300(GPT):
+    '''
+    same as 172 but cleaned up
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(conifg.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+
+        # ns = 10
+        ns = 3
+        x = x[None].repeat((ns,1,1,1)).reshape((-1,x.shape[1],x.shape[2]))
+        x0 = x
+
+        ## pre process the token to 
+        x = x0
+        for block in self.transformer.h0:
+            x = block(x,x0)
+        x1 = x
+        
+        x = x1
+        for block in self.transformer.h1:
+            x = block(x,x1)
+
+        block = self.transformer.hlast
+        x = block(x,x0)
+        x = self.transformer.ln_f(x)
+
+
+
+        if targets is not None:
+            # logits = (x*w)
+            # logits = self.lm_head(x*self.norm_w.exp())    
+            logits = self.lm_head(x)
+            # *self.norm_w.exp())    
+            # logits = logits  -(-self.lm_norm(xns.unsqueeze(-1))).square()
+            ###(bte)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets[None].repeat((ns,1,1,1)).reshape(-1), ignore_index=-1,reduction='none')
+
+            loss = loss.mean()
+
+        return logits, loss        
+
+
+import numpy as np
+
+class LGT001(GPT):
+    '''
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    _disabled = 0
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 6
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+
+    @staticmethod
+    def add_sample_interface(env,gr):
+        '''
+        Adding a sampling interface for the model
+        
+        '''
+        model = env.model
+        xvar = gr.State([])
+        with gr.Row() as row:
+            with gr.Column():
+                model_name = gr.Textbox(label='model_name', value= model.__class__.__name__)
+                c_temp = gr.Number(label='temperature',value=0.8)
+                c_topk = gr.Number(label='topk',value=200,precision=0)
+                c_max_token = gr.Number(label='max token',value=200,precision=0)
+
+            with gr.Column():
+                input_text = gr.Textbox(
+                    label="input_text ( model.text_generate )",
+                    value="(input text here)"
+                )
+                output_text = gr.Textbox(
+                    label="output_text",
+                    value="(input text here)"
+                )
+
+                btn = gr.Button("generate")
+
+
+
+
+        def generate(input_text, c_temp, c_topk, c_max_token, var):
+            enc_text = env.encode(input_text)
+            ret = env.model.text_generate(enc_text, temperature=c_temp, top_k=(c_topk), max_new_tokens= (c_max_token))
+            ret = env.decode(ret)
+            return ret
+
+
+        btn.click(
+            generate, 
+            [input_text,c_temp,c_topk, c_max_token, xvar],
+            output_text
+            )
+
+
+        with gr.Blocks() as demo:
+            # with gr.Group():
+
+                with gr.Row() as row:
+                    with gr.Column():
+                        model_name = gr.Textbox(label='model_name', value= model.__class__.__name__)
+                        btn_decode =  gr.Button("decode")
+
+                        with gr.Group():
+                            sliders = [gr.Slider(value=0., scale=None, show_label = True, container=True, label=i, 
+                            interactive=True,
+                                minimum = 0, maximum = model.config.nsep, step = 1) for i in range(model.config.nm*model.config.nm_a)]
+                            pass
+
+                    with gr.Column():
+                        debug_text = gr.Textbox(
+                            label="debug",
+                            value="debug"
+                        )
+
+                        input_text = gr.Textbox(
+                            label="input_text",
+                            value="(input text here)",
+                            interactive=True,
+                        )
+                        output_text = gr.Textbox(
+                            label="output_text",
+                            value="(output text here)"
+                        )
+                        btn_encode = gr.Button("encode")
+                        btn_extend = gr.Button("extend")
+ 
+                    # def f_decode(sliders, input_text, c_temp, c_topk, c_max_token, var):
+                    def f_decode(input_text,*sliders, ):
+                        # input_text, c_temp, c_topk, c_max_token, var):
+                        _input_text=''
+                        enc_text = env.encode(_input_text)
+                        lat_code = [xx for xx in sliders]
+                        v_output = ''
+                        max_new_tokens= 30
+
+                        _lat_code = torch.tensor(lat_code,device=model.lm_head.weight.device).reshape((-1, model.nm, model.nm_a)).float()
+                        prefix, ret = env.model.text_generate(enc_text, lat_code = lat_code, temperature=c_temp.value, top_k=(c_topk).value, 
+                            # max_new_tokens= (c_max_token.value ),
+                            max_new_tokens= model.config.block_size,
+                        )
+                        idx=  model.cast_input_list(ret)
+                        logits, lpy = model.decode_with_prefix(model.lat_code_to_prefix(_lat_code), model.pad_start(idx)[:,:-1],idx)
+                        # logits, loss = model.decode_with_prefix(prefix, idx[:,:-1],idx[:,1:])
+                        lp = lpy.mean() /idx.shape[1] 
+                        ret = env.decode(ret)
+                        v_output = ret
+
+                        _lat_code = torch.tensor(lat_code,device=idx.device).reshape((-1, model.nm, model.nm_a)).float()
+                        idx = model.cast_input_list(env.encode(input_text))
+                        idx = idx[:,:model.config.block_size]
+                        logits, lpy = model.decode_with_prefix(model.lat_code_to_prefix(_lat_code), model.pad_start(idx)[:,:-1],idx)
+                        lp2 = lpy.mean() /idx.shape[1] 
+
+
+                        _lat_code = torch.tensor(lat_code,device=idx.device).reshape((-1, model.nm, model.nm_a)).float()
+                        idx = model.cast_input_list(env.encode(input_text))
+                        idx = idx[:,:model.config.block_size]
+                        logits, lpy = model.decode_with_prefix(model.lat_code_to_prefix(_lat_code*0+model.nsep/2), model.pad_start(idx)[:,:-1],idx)
+                        lp2b = lpy.mean() /idx.shape[1] 
+
+                        code_diff = np.abs(np.array(f_encode(v_output)) -  np.array(lat_code)).sum()
+                        code_diff2 = np.abs(np.array(f_encode(input_text)) -  np.array(lat_code)).sum()
+                        code_diff_max = np.abs(np.array(f_encode(v_output)) -  np.array(lat_code)).max()
+                        v_debug = str(lat_code[0].__class__)
+                        v_debug = f'''
+code_diff={code_diff} dmax={code_diff_max}
+cdf2={code_diff2} 
+lp={lp:.2f} lp2={lp2:.2f}
+lp2b={lp2b:.2f}
+out={input_text!r}'''
+
+                        return v_output,v_debug
+                                            
+                    btn_decode.click(
+                        f_decode,
+                        # [sliders, input_text,c_temp,c_topk, c_max_token, xvar],
+                        [input_text]+sliders,
+                        [output_text,debug_text],
+                    )   
+                    def f_encode(input_text):
+                        '''
+                        Encode the given text
+                        '''
+                        idx = env.encode(input_text)
+                        idx= idx[:model.config.block_size]
+                        idx = model.cast_input_list(idx)
+
+                        xz_int, xz = model.encode(model.pad_start(idx)[:,:-1])
+                        return xz_int.reshape(-1).detach().cpu().numpy().tolist()
+
+                    btn_encode.click(
+                        f_encode,
+                        [input_text],
+                        sliders,
+                        # [sliders, input_text,c_temp,c_topk, c_max_token, xvar],
+                        # sliders,
+                        # [output_text,debug_text],
+                    )   
+
+
+        return
+
+
+
+
+    def cast_input_list(self, enc_text):
+        x = (torch.tensor(enc_text, dtype=torch.long, device = self.lm_head.weight.device)[None, ...])
+        return x
+
+
+    def text_generate(self, enc_text, max_new_tokens, temperature=1.0, top_k=None,**kw):
+        x = self.cast_input_list(enc_text)
+
+        prefix, y = self.generate(x, max_new_tokens, temperature=temperature, top_k=top_k,**kw)
+
+        return prefix, (y[0].tolist())
+
+    def pad_start(self,idx):
+        assert idx[0,0]!=self.token_start,'refusing to pad a padded sequence'
+        idx = torch.cat([torch.zeros_like(idx[:,:1])+self.token_start, idx],1)
+        return idx
+
+    def lat_code_to_prefix(self,lat_code):
+        xz_noise = (lat_code)*self.sep + self.low
+        xz_noise = xz_noise + (torch.rand_like(xz_noise)-0.5)*self.sep
+        prefix   = self.transformer.comp_out(xz_noise)  
+        return prefix
+
+    # @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, lat_code = None):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+
+        """
+        b,t = idx.size()[:2]
+        if lat_code is None:
+            lat_code = torch.randint(self.nsep,(b,self.nm,self.nm_a),device=idx.device)
+        else:
+            lat_code = torch.tensor(lat_code,device=idx.device).reshape((-1,self.nm,self.nm_a)).float()
+        prefix = self.lat_code_to_prefix(lat_code)
+
+
+        if t ==0 :
+            idx = torch.zeros((b,1),device=idx.device).long() + self.token_start  
+            pass
+
+        for _ in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # forward the model to get the logits for the index in the sequence
+            # logits, _ = self(idx_cond)
+            logits, _ = self.decode_with_prefix(prefix,idx_cond,None)
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits[:, -1, :] / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+        if t ==0:
+            idx = idx[:,1:]
+        return prefix, idx
+
+
+    def encode(self,idx):
+        # assert (idx[:,0]==self.token_start).all()
+        idx[:,0] = self.token_start
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        nm = self.nm
+
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+
+        xz_int = (xz.clip(low,high-0.001) - low)//sep
+        return xz_int, xz
+
+    @property
+    def token_start(self):
+        return self.vmax-2
+
+    def forward(self, idx, targets=None):
+        '''
+        the first token of index is masked to vmax-2
+        '''
+
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item(), self.prior_logsigma.exp().item(), self.post_logsigma.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        nm = self.nm
+        
+        x = idx
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+
+        idx[:,0]   = self.token_start
+        xz_int, xz = self.encode(idx)
+
+        ### quantised variable
+        ### ns*b,m
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        ### OOD penalisation
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+        xz_noise = ( (xz_int)*sep + low - xz).detach() + xz 
+        xz_noise = xz_noise + (torch.rand_like(xz_noise)-0.5)*sep
+        prefix   = self.transformer.comp_out(xz_noise)
+
+        ### gradient of log_p encoder: q(e_y|d)
+        lpz = self.get_log_prior(xz_int, xz_noise)
+
+
+        _disabled = self._disabled
+        # _disabled = 1;  
+        if _disabled:
+            print('[DEBUG]Disabling the latent!!!!!!!!------------')
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        ### adding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+        lpz = lpz.reshape(ns,-1,nm).sum(-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+        lpy = lpy.reshape(ns,-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            loss = lpy + lpz + lpe
+            loss = -loss.mean() / t
+        return logits, loss       
+
+    def get_log_prior(self, xz_int, xz_noise):
+        ### (ns*b,m,e)
+        ### uniform prior
+        lpz = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        return lpz.sum(-1)
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+        x = self.transformer.ln_f(x)
+
+
+        loss = 0.
+        lpy = 0.
+        if targets is not None:
+            logits = self.lm_head(x)        
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((-1,t)).sum(-1)        
+        else:
+            logits = self.lm_head(x[:,[-1]])
+        return logits,lpy
+
+
+class LGT006(LGT001):
+    '''
+    same as LGT001 but adding a prior
+    '''
+    pass
+
+    @property
+    def token_start(self):
+        return self.vmax-2
+
+    def forward(self, idx, targets=None):
+        '''
+        the first token of index is masked to vmax-2
+        '''
+
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item(), self.prior_logsigma.exp().item(), self.post_logsigma.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        nm = self.nm
+        
+        x = idx
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+
+        idx[:,0]   = self.token_start
+        xz_int, xz = self.encode(idx)
+
+        ### quantised variable
+        ### ns*b,m
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        ### OOD penalisation
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+        ### gradient of log_p encoder: q(e_y|d)
+
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+        xz_noise = ( (xz_int)*sep + low - xz).detach() + xz 
+        xz_noise = xz_noise + (torch.rand_like(xz_noise)-0.5)*sep
+        prefix   = self.transformer.comp_out(xz_noise)
+
+        _disabled = 0
+        # _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, prefix_out, lpy = self.decode_with_prefix(prefix,idx,targetss)
+
+
+        lpz = self.get_log_prior(xz_int).sum(-1)
+
+        # ### OOD penalisation
+        # prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        # invsqsigma = 1./(2*prior_logsigma).exp()
+        # zgrid = torch.linspace(low,high,nsep,device=x.device)[None,:]        
+        # ### (bsize, ncat)
+        # v = (-0.5*invsqsigma*(zgrid - prefix_out).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).log_softmax(-1)
+        # lpz = torch.eye(nsep,device=x.device)[xz_int.long()].reshape((ns*b,-1)).matmul(v.reshape(-1,1))
+
+        ### adding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+        lpz = lpz.reshape(ns,-1,nm).sum(-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+        lpy = lpy.reshape(ns,-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            loss = lpy + lpz + lpe
+            loss = -loss.mean() / t
+        return logits, loss       
+
+    def get_log_prior(self, xz_int):
+        ### (ns*b,m,e)
+        ### uniform prior
+        lpz = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        return lpz
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = self.transformer.ln_f(x)
+        x = x[:,nm:]
+        prefix_out = x[:,:nm]
+
+
+        loss = 0.
+        lpy = 0.
+        if targets is not None:
+            logits = self.lm_head(x)        
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((-1,t)).sum(-1)        
+        else:
+            logits = self.lm_head(x[:,[-1]])
+        return logits,prefix_out, lpy
+
+
+class LGT010(LGT001):
+
+
+    def encode(self,idx):
+        # assert (idx[:,0]==self.token_start).all()
+        idx[:,0] = self.token_start
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        nm = self.nm
+
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        # xz = x[:,-nm:]
+        # xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        # xz_int = (xz.clip(low,high-0.001) - low)//sep
+        return x
+        # return xz_int, xz
+
+    def forward(self, idx, targets=None):
+        '''
+        the first token of index is masked to vmax-2
+        '''
+
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item(), self.prior_logsigma.exp().item(), self.post_logsigma.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        nm = self.nm
+        
+        x = idx
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+
+        idx[:,0]   = self.token_start
+
+        th = t//2
+        ### forward the first half of the model
+        xz = self.encode(idx[:,:th])
+
+        ### internal code
+        prefix = xz[:,th:]
+        xhalf  = xz[:,:th]
+    
+
+
+        ### quantised variable
+        ### ns*b,m
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        ### OOD penalisation
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+        ### gradient of log_p encoder: q(e_y|d)
+        # lpz = self.get_log_prior(xz_int).sum(-1)
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+        # xz_noise = ( (xz_int)*sep + low - xz).detach() + xz 
+        # xz_noise = xz_noise + (torch.rand_like(xz_noise)-0.5)*sep
+        # prefix   = self.transformer.comp_out(xz_noise)
+
+        _disabled = 0
+        _disabled =  1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            # v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoding the second half
+        logits, lpy = self.decode_with_prefix(prefix, idx, xhalf, targetss, th)
+        ### adding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+        lpe = lpe.reshape(ns,b,-1).sum(-1)
+        lpy = lpy.reshape(ns,-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy 
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            loss = lpy
+            # loss = lpy  + lpe
+            loss = -loss.mean() / t
+        return logits, loss       
+
+
+    def decode_with_prefix(self, prefix, idx, xhalf, targets, th):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        ## remove prefix
+        x = x[:,nm:]
+        x = self.transformer.ln_f(x)
+
+        ### scoring two segment separately
+        x = torch.cat([xhalf,x[:,th:]],dim=1)
+
+        loss = 0.
+        lpy = 0.
+        if targets is not None:
+            logits = self.lm_head(x)        
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((-1,t)).sum(-1)        
+        else:
+            logits = self.lm_head(x[:,[-1]])
+        return logits,lpy
+
+
+class LGT011(LGT001):
+
+
+    def encode(self,idx):
+        # assert (idx[:,0]==self.token_start).all()
+        idx[:,0] = self.token_start
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        nm = self.nm
+
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        # xz = x[:,-nm:]
+        # xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        # xz_int = (xz.clip(low,high-0.001) - low)//sep
+        return x
+        # return xz_int, xz
+
+    def forward(self, idx, targets=None):
+        '''
+        the first token of index is masked to vmax-2
+        '''
+
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item(), self.prior_logsigma.exp().item(), self.post_logsigma.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        nm = self.nm
+        
+        x = idx
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+
+        idx[:,0]   = self.token_start
+
+        th = t//2
+        ### forward the first half of the model
+        xz = self.encode(idx[:,:th])
+
+        ### internal code
+        prefix = xz[:,th:]
+        xhalf  = xz[:,:th]
+    
+
+
+        ### quantised variable
+        ### ns*b,m
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        ### OOD penalisation
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+        ### gradient of log_p encoder: q(e_y|d)
+        # lpz = self.get_log_prior(xz_int).sum(-1)
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+        # xz_noise = ( (xz_int)*sep + low - xz).detach() + xz 
+        # xz_noise = xz_noise + (torch.rand_like(xz_noise)-0.5)*sep
+        # prefix   = self.transformer.comp_out(xz_noise)
+
+        _disabled = 0
+        _disabled =  1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            # v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoding the second half
+        logits, lpy = self.decode_with_prefix(prefix, idx, xhalf, targetss, th)
+        ### adding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+        lpe = lpe.reshape(ns,b,-1).sum(-1)
+        lpy = lpy.reshape(ns,-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy 
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            loss = lpy
+            # loss = lpy  + lpe
+            loss = -loss.mean() / t
+        return logits, loss       
+
+
+    def decode_with_prefix(self, prefix, idx, xhalf, targets, th):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        tok_emb = torch.cat([tok_emb[:,:th], prefix, tok_emb[:,th:]],dim=1)
+        del xhalf
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        ## remove prefix
+        # x = x[:,nm:]
+        x = torch.cat([x[:,:th],x[:, th+nm:]],dim=1)
+        x = self.transformer.ln_f(x)
+
+        ### scoring two segment separately
+        # x = torch.cat([xhalf,x[:,th:]],dim=1)
+
+        loss = 0.
+        lpy = 0.
+        if targets is not None:
+            logits = self.lm_head(x)        
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((-1,t)).sum(-1)        
+        else:
+            logits = self.lm_head(x[:,[-1]])
+        return logits,lpy
+
+
+
+class LGT001D(LGT001):
+    '''
+    50^(12*5)
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+
+
+
+
+
+class LGT001G(LGT001):
+    '''
+    50^(12*5)
+    same as LGT001D but adding a GRU prior
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # self.prior_h = prior_h = 100
+        self.prior_h = prior_h = 200
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 2, batch_first=True)
+        self.prior_gru  = nn.GRU(nm_a, prior_h, 3, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        self.prior_proj = nn.Linear(prior_h*nsep, nm*nm_a,bias=True)
+        self.prior_ln   = LayerNorm(prior_h, bias=config.bias)
+        # self.prior_pos  = nn.Linear(prior_h*nm*nm_a,bias=False) 
+        self.prior_ln   = LayerNorm(prior_h, bias=config.bias)
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+        self._disabled=0
+        # self._disabled=1
+
+
+
+    # def get_log_prior(self, xz_int, xz_noise):
+    #     ### (ns*b,m,e)
+    #     ### uniform prior
+    #     lpz = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+    #     # print(lpz.shape, self.nsep)
+    #     return lpz.sum(-1)
+
+    def get_log_prior(self, xz_int, xz_noise):
+
+        ### warmup training adapting prior to observation 
+        xz_noise = xz_noise.detach()
+
+        xz_input = torch.cat([torch.ones_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        # xz_input = xz
+        # xz_input = torch.cat([torch.zeros_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+
+        y = self.prior_ln(y) 
+        # y = y * 10
+        # y = y * 0.1
+
+
+        out = torch.einsum('bmg,mgek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep) )
+        # out = torch.einsum('bmg,gek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep)[0])
+
+        out = out.log_softmax(-1)
+
+        lpz = torch.einsum('btec,btec->bt', torch.eye(self.nsep,device=xz_noise.device)[xz_int.long(),:], out)
+        # print(out.exp()[0,5,:3,:10]*self.nsep)
+        return lpz
+
+
+class LGT001H(LGT001):
+    '''
+    50^(12*5)
+    same as G but attach gradient from prior
+    same as LGT001D but adding a GRU prior
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # self.prior_h = prior_h = 100
+        self.prior_h = prior_h = 200
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 2, batch_first=True)
+        self.prior_gru  = nn.GRU(nm_a, prior_h, 3, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        self.prior_proj = nn.Linear(prior_h*nsep, nm*nm_a,bias=True)
+        self.prior_ln   = LayerNorm(prior_h, bias=config.bias)
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+        self._disabled=0
+        # self._disabled=1
+
+
+
+    def get_log_prior(self, xz_int, xz_noise):
+
+        ### warmup training adapting prior to observation 
+        # xz_noise = xz_noise.detach()
+
+        xz_input = torch.cat([torch.ones_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        # xz_input = xz
+        # xz_input = torch.cat([torch.zeros_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+
+        y = self.prior_ln(y) 
+        # y = y * 10
+        # y = y * 0.1
+
+
+        out = torch.einsum('bmg,mgek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep) )
+        # out = torch.einsum('bmg,gek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep)[0])
+
+        out = out.log_softmax(-1)
+
+        lpz = torch.einsum('btec,btec->bt', torch.eye(self.nsep,device=xz_noise.device)[xz_int.long(),:], out)
+        # print(out.exp()[0,5,:3,:10]*self.nsep)
+        return lpz
+
+
+
+class LGT001K(LGT001):
+    '''
+    50^(12*5)
+
+    same as H but a shallow GRU
+    same as G but attach gradient from prior
+    same as LGT001D but adding a GRU prior
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # self.prior_h = prior_h = 100
+        self.prior_h = prior_h = 200
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 2, batch_first=True)
+        self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        self.prior_proj = nn.Linear(prior_h*nsep, nm*nm_a,bias=True)
+        self.prior_ln   = LayerNorm(prior_h, bias=config.bias)
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+        self._disabled=0
+        self._disabled=1
+
+
+
+    def get_log_prior(self, xz_int, xz_noise):
+
+        ### warmup training adapting prior to observation 
+        # xz_noise = xz_noise.detach()
+
+        xz_input = torch.cat([torch.ones_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        # xz_input = xz
+        # xz_input = torch.cat([torch.zeros_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+
+        y = self.prior_ln(y) 
+        # y = y * 10
+        # y = y * 0.1
+
+
+        out = torch.einsum('bmg,mgek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep) )
+        # out = torch.einsum('bmg,gek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep)[0])
+
+        out = out.log_softmax(-1)
+
+        lpz = torch.einsum('btec,btec->bt', torch.eye(self.nsep,device=xz_noise.device)[xz_int.long(),:], out)
+        # print(out.exp()[0,5,:3,:10]*self.nsep)
+        return lpz
+
+
+
+
+class LGT001M(LGT001):
+    '''
+    50^(12*5)
+    same as K but sharing a support matrix with decoder
+    same as H but a shallow GRU
+    same as G but attach gradient from prior
+    same as LGT001D but adding a GRU prior
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # self.prior_h = prior_h = 100
+        self.prior_h = prior_h = 200
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 2, batch_first=True)
+        self.prior_gru  = nn.GRU(config.n_embd, prior_h, 1, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        self.prior_proj = nn.Linear(prior_h*nsep, nm*nm_a,bias=True)
+        self.prior_ln   = LayerNorm(prior_h, bias=config.bias)
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+        self._disabled=0
+        self._disabled=1
+
+
+
+    def get_log_prior(self, xz_int, xz_noise):
+
+        ### warmup training adapting prior to observation 
+        # xz_noise = xz_noise.detach()
+        xz_noise = self.transformer.comp_out(xz_noise).float()
+
+        xz_input = torch.cat([torch.ones_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        # xz_input = xz
+        # xz_input = torch.cat([torch.zeros_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+
+        y = self.prior_ln(y) 
+        # y = y * 10
+        # y = y * 0.1
+
+
+        out = torch.einsum('bmg,mgek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep) )
+        # out = torch.einsum('bmg,gek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep)[0])
+
+        out = out.log_softmax(-1)
+
+        lpz = torch.einsum('btec,btec->bt', torch.eye(self.nsep,device=xz_noise.device)[xz_int.long(),:], out)
+        # print(out.exp()[0,5,:3,:10]*self.nsep)
+        return lpz
+
+
+
+
+class LGT001J(LGT001):
+    '''
+    50^(12*5)
+    same as G but attach gradient from prior
+    same as LGT001D but adding a GRU prior
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # self.prior_h = prior_h = 100
+        self.prior_h = prior_h = 200
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 2, batch_first=True)
+        self.prior_gru  = nn.GRU(nm_a, prior_h, 3, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        # self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        self.prior_proj = nn.Linear(prior_h*nsep, nm*nm_a,bias=True)
+        self.prior_ln   = LayerNorm(prior_h, bias=config.bias)
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+        self._disabled=0
+        self._disabled=1
+
+
+
+    def get_log_prior(self, xz_int, xz_noise):
+
+        ### warmup training adapting prior to observation 
+        # xz_noise = xz_noise.detach()
+
+        xz_input = torch.cat([torch.ones_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        # xz_input = xz
+        # xz_input = torch.cat([torch.zeros_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+
+        y = self.prior_ln(y) 
+        # y = y * 10
+        # y = y * 0.1
+
+
+        # out = torch.einsum('bmg,mgek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep) )
+        # out = torch.einsum('bmg,gek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep)[0])
+
+
+        # prior_logsigma = torch.tensor(math.log(0.1),device=xz_noise.device)
+        prior_logsigma = torch.tensor(math.log(0.2),device=xz_noise.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        zgrid = torch.linspace(self.low,self.high,self.nsep,device=y.device)[None,None,None,:]        
+        out = torch.einsum('bmg,mge->bme', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep)[:,:,:,0] )
+        out = out.unsqueeze(-1)
+        out = (-0.5*invsqsigma*(zgrid - out).square()  - prior_logsigma - 0.5*math.log(2*math.pi) )
+        out = out.log_softmax(-1)
+
+        lpz = torch.einsum('btec,btec->bt', torch.eye(self.nsep,device=xz_noise.device)[xz_int.long(),:], out)
+        # print(out.exp()[0,5,:3,:10]*self.nsep)
+        return lpz
+
+
+        # # y = y * 10
+        # y = y * 1
+
+        # prior_logsigma = torch.tensor(math.log(0.1),device=xz_noise.device)
+        # invsqsigma = 1./(2*prior_logsigma).exp()
+        # zgrid = torch.linspace(self.low,self.high,self.nsep,device=y.device)[None,None,None,:]        
+        # ### (bsize, ncat)
+
+        # out = torch.einsum('bmg,mge->bme', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep)[:,:,:,0] )
+        # out = out.unsqueeze(-1)
+        # out = (-0.5*invsqsigma*(zgrid - out).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).log_softmax(-1)
+
+
+        # lpz_int = torch.einsum('btec,btec->bt',torch.eye(self.nsep,device=xz_noise.device)[xz_int.long()], out.log_softmax(-1))
+        # lpz = lpz_int
+        
+        # return lpz
+
+
+
+
+
+
+
+
+class LGT001F(LGT001):
+    '''
+    50^(12*5)
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 20
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 3 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+
+
+
+
+
+class LGT001E(LGT001):
+    '''
+    6*10*50
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 6
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 10 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 50
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+class LGT001B(LGT001):
+    '''
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 6
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = config.nm_a = nm_a = 5 ### R2
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 9
+        self.sep = (self.high -self.low)/self.nsep
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+
+class LGT004(GPT):
+    '''
+    conclusion: gaussian prior would prefer a non-latent model
+    same as LGT001B but adding a trainable prior on p(z=e_y), instead of uniform
+         placing a continous gaussian on z
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        config.nm = nm = 6
+        self.nm = nm 
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = nm_a = 5 ### R2
+        self.nsep = 5
+        self.nsep = nsep = 9
+
+        bsize = nm_a * nm
+        self.prior_sigma = nn.Linear(bsize,1)
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.zeros((bsize,))+math.log(3.))
+        #  torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item(), self.prior_logsigma.mean().exp().item(), ])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # ns = 3
+        # ns = 6
+        ns = self.ns
+        nm = self.nm
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        # t = t + nm
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = -3.0
+        high = 3.0
+        nsep = self.nsep
+
+        sep = (high - low)/nsep
+
+        ### quantised variable
+        ### ns*b,m
+        xz_int = (xz.clip(low,high-0.001) - low)//sep
+        xz_noise_new = (xz_int)*sep + low
+
+
+        ### OOD penalisation
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+
+        ### resampled representation q( z|d )
+        xz_noise = (xz_noise_new - xz).detach() + xz + (torch.rand_like(xz)-0.5)*sep
+        
+        #### scroing with discrete version
+        # lpz_int = self.get_log_prior(xz_int)
+        
+        prior_logsigma  = self.prior_logsigma[:,None]
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        zgrid = torch.linspace(low,high,nsep,device=x.device)[None,:]
+        
+        ### (bsize, ncat)
+        v = (-0.5*invsqsigma*(zgrid - 0.).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).log_softmax(-1)
+        
+        lpz_int = torch.eye(nsep,device=x.device)[xz_int.long()].reshape((ns*b,-1)).matmul(v.reshape(-1,1))
+
+        ####
+        # lpz_int = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        # lpz_int = lpz_int.sum((1,2))
+        ### using continous counterpart for training
+        # lpz = lpz_int
+
+        # lpz 
+        prior_logsigma  = self.prior_logsigma[None,]
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        lpz = (-0.5*invsqsigma*(xz_noise.reshape(ns*b,-1) - 0.).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum(-1)
+
+        
+
+
+        prefix = self.transformer.comp_out(xz_noise)
+        _disabled = 0
+        _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            # print(v)
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        lpz_int = lpz_int.reshape(ns,-1)
+        lpz = lpz.reshape(ns,-1)
+        # .sum(-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz_int
+            # loss = lpy
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            loss = lpy + lpz + lpe
+            loss = -loss.mean() / t
+        return logits, loss       
+
+    # def get_log_prior(self, xz_int):
+    #     ### (ns*b,m,e)
+    #     ### uniform prior
+    #     lpz = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+    #     return lpz.sum((1,2))
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+        # lprior = 
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+
+        x = self.transformer.ln_f(x)
+
+
+        logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpy = -loss.reshape((ns,-1,t)).sum(-1)        
+        return logits,lpy
+
+
+class LGT005(GPT):
+    '''
+    same as LGT004 but using a GRU for prior
+    same as LGT001B but adding a trainable prior on p(z=e_y), instead of uniform
+         placing a continous gaussian on z
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        config.nm = nm = 6
+        self.nm = nm 
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = nm_a = 5 ### R2
+        self.nsep = 5
+        self.nsep = nsep = 9
+
+        bsize = nm_a * nm
+        self.prior_sigma = nn.Linear(bsize,1)
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.prior_h = prior_h = 100
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        self.prior_gru  = nn.GRU(nm_a, prior_h, 1, batch_first=True)
+        self.prior_proj = nn.Linear(prior_h*nsep, nm*nm_a,bias=True)
+        # self.nm, self.prior_h, self.nm_a, self.nsep)
+        self.prior_ln   = LayerNorm(prior_h, bias=config.bias)
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        # self.prior_logsigma = nn.Parameter(torch.zeros((bsize,))+math.log(3.))
+        #  torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            # print([self.norm_w.exp().item(), self.prior_logsigma.mean().exp().item(), ])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # ns = 3
+        # ns = 6
+        ns = self.ns
+        nm = self.nm
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        # t = t + nm
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = -3.0
+        high = 3.0
+        nsep = self.nsep
+
+        sep = (high - low)/nsep
+
+        ### quantised variable
+        ### ns*b,m
+        xz_int = (xz.clip(low,high-0.001) - low)//sep
+        xz_noise_new = (xz_int)*sep + low
+
+
+        ### OOD penalisation
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+
+        ### resampled representation q( z|d )
+        xz_noise = (xz_noise_new - xz).detach() + xz + (torch.rand_like(xz)-0.5)*sep
+        
+        #### scroing with discrete version
+        # lpz_int = self.get_log_prior(xz_int)
+        
+
+
+        ####
+        # lpz_int = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        # lpz_int = lpz_int.sum((1,2))
+        ### using continous counterpart for training
+        # lpz = lpz_int
+        
+
+        
+        # prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        # prior_logsigma = torch.tensor(math.log(1.0),device=x.device)
+        # invsqsigma = 1./(2*prior_logsigma).exp()
+        
+        xz_input = torch.cat([torch.ones_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+        y = self.prior_ln(y)
+        out = torch.einsum('bmg,mgek->bmek', y, self.prior_proj.weight.reshape(self.nm, self.prior_h, self.nm_a, self.nsep) )
+        
+        lpz_int = torch.einsum('btec,btec->b',torch.eye(nsep,device=x.device)[xz_int.long()], out.log_softmax(-1))
+        lpz = lpz_int
+
+        # ### b,m,g
+        # ### b,m,e,k
+        # ### mgek 5*100*6*9
+        # ### 9**5
+        # y = self.prior_proj(y)
+        # lpz = (-0.5*invsqsigma*(y - xz_noise).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum((1,2))
+ 
+        # zgrid = torch.linspace(low,high,nsep,device=x.device)[None,None,None,:]
+
+        # v = (-0.5*invsqsigma*(y.unsqueeze(-1) - zgrid).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).log_softmax(-1)
+        # lpz_int = torch.einsum('btec,btec->b',torch.eye(nsep,device=x.device)[xz_int.long()], v)
+        # # print(lpz.shape,lpz_int.shape)
+
+
+        # lpz = (-0.5*invsqsigma*(xz_noise.reshape(ns*b,-1) - 0.).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum(-1)
+
+
+        prefix = self.transformer.comp_out(xz_noise)
+        _disabled = 0
+        _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            # print(v)
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        lpz_int = lpz_int.reshape(ns,-1)
+        lpz = lpz.reshape(ns,-1)
+        # .sum(-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz_int
+            # loss = lpy
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            loss = lpy + lpz + lpe
+            loss = -loss.mean() / t
+        return logits, loss       
+
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+        # lprior = 
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+
+        x = self.transformer.ln_f(x)
+
+
+        logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpy = -loss.reshape((ns,-1,t)).sum(-1)        
+        return logits,lpy
+
+
+
+class LGT005B(GPT):
+    '''
+    same as LGT005 but scoring differently
+    same as LGT004 but using a GRU for prior
+    same as LGT001B but adding a trainable prior on p(z=e_y), instead of uniform
+         placing a continous gaussian on z
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        config.nm = nm = 6
+        self.nm = nm 
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = nm_a = 5 ### R2
+        self.nsep = 5
+        self.nsep = nsep = 9
+
+        bsize = nm_a * nm
+        self.prior_sigma = nn.Linear(bsize,1)
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        self.prior_gru  = nn.GRU(nm_a, 100, 1, batch_first=True)
+        self.prior_proj = nn.Linear(100, nm_a,bias=True)
+        self.prior_ln   = LayerNorm(100, bias=config.bias)
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        # self.prior_logsigma = nn.Parameter(torch.zeros((bsize,))+math.log(3.))
+        #  torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            # print([self.norm_w.exp().item(), self.prior_logsigma.mean().exp().item(), ])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # ns = 3
+        # ns = 6
+        ns = self.ns
+        nm = self.nm
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        # t = t + nm
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = -3.0
+        high = 3.0
+        nsep = self.nsep
+
+        sep = (high - low)/nsep
+
+        ### quantised variable
+        ### ns*b,m
+        xz_int = (xz.clip(low,high-0.001) - low)//sep
+        xz_noise_new = (xz_int)*sep + low
+
+
+        ### OOD penalisation
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+
+        ### resampled representation q( z|d )
+        xz_noise = (xz_noise_new - xz).detach() + xz + (torch.rand_like(xz)-0.5)*sep
+        
+        #### scroing with discrete version
+        # lpz_int = self.get_log_prior(xz_int)
+        
+
+        ####
+        # lpz_int = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        # lpz_int = lpz_int.sum((1,2))
+        ### using continous counterpart for training
+        # lpz = lpz_int
+
+
+        
+        # prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        
+        ### R2
+        # prior_logsigma = torch.tensor(math.log(0.25),device=x.device)
+
+        ### noR
+        prior_logsigma = torch.tensor(math.log(1.0),device=x.device)
+
+        # prior_logsigma = torch.tensor(math.log(0.8),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        
+        xz_input = torch.cat([torch.ones_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+        y = self.prior_ln(y)
+        y = self.prior_proj(y)
+        lpz = (-0.5*invsqsigma*(y - xz_noise).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum((1,2))
+        lpz = lpz.reshape(ns,-1)
+
+        zgrid = torch.linspace(low,high,nsep,device=x.device)[None,None,None,:]
+
+        v = (-0.5*invsqsigma*(y.unsqueeze(-1) - zgrid).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).log_softmax(-1)
+        lpz_int = torch.einsum('btec,btec->b',torch.eye(nsep,device=x.device)[xz_int.long()], v)
+        # lpz_int = torch.einsum('btec,btec->bt',torch.eye(nsep,device=x.device)[xz_int.long()], v)
+        # print(lpz.shape,lpz_int.shape)
+
+
+        # lpz = (-0.5*invsqsigma*(xz_noise.reshape(ns*b,-1) - 0.).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum(-1)
+
+
+        prefix = self.transformer.comp_out(xz_noise)
+        _disabled = 0
+        _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            # print(v)
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        lpz_int = lpz_int.reshape(ns,-1)
+        # lpz = lpz.reshape(ns,-1)
+        # .sum(-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz_int
+            # loss = lpy
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            # loss = lpy + lpz + lpe
+            loss = lpy + lpz_int + lpe + lpz
+            loss = -loss.mean() / t
+
+        return logits, loss       
+
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+        # lprior = 
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+
+        x = self.transformer.ln_f(x)
+
+
+        logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpy = -loss.reshape((ns,-1,t)).sum(-1)        
+        return logits,lpy
+
+
+class LGT005C(GPT):
+    '''
+    same as LGT005 but scoring differently
+    same as LGT004 but using a GRU for prior
+    same as LGT001B but adding a trainable prior on p(z=e_y), instead of uniform
+         placing a continous gaussian on z
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        config.nm = nm = 6
+        self.nm = nm 
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = nm_a = 5 ### R2
+        self.nsep = 5
+        self.nsep = nsep = 9
+
+        bsize = nm_a * nm
+        self.prior_sigma = nn.Linear(bsize,1)
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        self.prior_gru  = nn.GRU(nm_a, 100, 1, batch_first=True)
+        # self.prior_proj = nn.Linear(100, nm_a,bias=True)
+        self.prior_proj = nn.Linear(100, nm_a,bias=False)
+        self.prior_ln   = LayerNorm(nm_a, bias=config.bias)
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        # self.prior_logsigma = nn.Parameter(torch.zeros((bsize,))+math.log(3.))
+        #  torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            # print([self.norm_w.exp().item(), self.prior_logsigma.mean().exp().item(), ])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # ns = 3
+        # ns = 6
+        ns = self.ns
+        nm = self.nm
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        # t = t + nm
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = -3.0
+        high = 3.0
+        nsep = self.nsep
+
+        sep = (high - low)/nsep
+
+        ### quantised variable
+        ### ns*b,m
+        xz_int = (xz.clip(low,high-0.001) - low)//sep
+        xz_noise_new = (xz_int)*sep + low
+
+
+        ### OOD penalisation
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+
+        ### resampled representation q( z|d )
+        xz_noise = (xz_noise_new - xz).detach() + xz + (torch.rand_like(xz)-0.5)*sep
+        
+        #### scroing with discrete version
+        # lpz_int = self.get_log_prior(xz_int)
+        
+        ####
+        # lpz_int = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        # lpz_int = lpz_int.sum((1,2))
+        ### using continous counterpart for training
+        # lpz = lpz_int
+
+
+        
+        # invsqsigma1
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        
+        ### R2
+        # prior_logsigma = torch.tensor(math.log(0.25),device=x.device)
+
+        ### noR
+        # prior_logsigma = torch.tensor(math.log(1.0),device=x.device)
+
+        # prior_logsigma = torch.tensor(math.log(0.8),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        
+        xz_input = torch.cat([torch.zeros_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        y,yh = self.prior_gru(xz_input)
+        # y = self.prior_ln2(self.prior_proj(y)+xz_input)
+        y = (self.prior_proj(y)+xz_input)
+        # y = self.prior_proj(y)
+        lpe2 = -0.5*invsqsigma*(y - y.clip(low,high)).square().sum((1,2))
+        lpz = (-0.5*invsqsigma*(y - xz_noise).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum((1,2))
+        lpz  = lpz.reshape(ns,-1)
+        lpe2 = lpe2.reshape(ns,-1)
+        
+        zgrid = torch.linspace(low,high,nsep,device=x.device)[None,None,None,:]
+
+        v = (-0.5*invsqsigma*(y.unsqueeze(-1) - zgrid).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).log_softmax(-1)
+        lpz_int = torch.einsum('btec,btec->b',torch.eye(nsep,device=x.device)[xz_int.long()], v)
+        # lpz_int = torch.einsum('btec,btec->bt',torch.eye(nsep,device=x.device)[xz_int.long()], v)
+        # print(lpz.shape,lpz_int.shape)
+
+
+        # lpz = (-0.5*invsqsigma*(xz_noise.reshape(ns*b,-1) - 0.).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum(-1)
+
+
+        prefix = self.transformer.comp_out(xz_noise)
+        _disabled = 0
+        # _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            # print(v)
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        lpz_int     = lpz_int.reshape(ns,-1)
+        lpe         = lpe.reshape(ns,-1,nm).sum(-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz_int 
+            # loss = lpy
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            # loss = lpy + lpz + lpe
+            loss = lpy + lpz_int + lpe + lpe2
+            loss = -loss.mean() / t
+
+        return logits, loss       
+
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+        # lprior = 
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+
+        x = self.transformer.ln_f(x)
+
+
+        logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpy = -loss.reshape((ns,-1,t)).sum(-1)        
+        return logits,lpy
+
+
+class LGT005D(GPT):
+    '''
+    same as LGT005 but scoring differently
+    same as LGT004 but using a GRU for prior
+    same as LGT001B but adding a trainable prior on p(z=e_y), instead of uniform
+         placing a continous gaussian on z
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        config.nm = nm = 6
+        self.nm = nm 
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = nm_a = 5 ### R2
+        self.nsep = 5
+        self.nsep = nsep = 9
+
+        bsize = nm_a * nm
+        self.prior_sigma = nn.Linear(bsize,1)
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+            # ln_f3 = LayerNorm(self.nm_a, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        self.prior_gru  = nn.GRU(nm_a, 100, 1, batch_first=True)
+        # self.prior_proj = nn.Linear(100, nm_a,bias=True)
+        self.prior_proj = nn.Linear(100, nm_a,bias=False)
+        self.prior_ln   = LayerNorm(nm_a, bias=config.bias)
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        config = copy.copy(config)
+        # config.n_embd = nm_a
+        self.comp_in2 = nn.Linear(config.n_embd, nm_a,bias=False)
+        self.comp_out2 = nn.Linear(nm_a, config.n_embd, bias=False)
+
+        # self.hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        # self.prior_logsigma = nn.Parameter(torch.zeros((bsize,))+math.log(3.))
+        #  torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            # print([self.norm_w.exp().item(), self.prior_logsigma.mean().exp().item(), ])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # ns = 3
+        # ns = 6
+        ns = self.ns
+        nm = self.nm
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        # t = t + nm
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = -3.0
+        high = 3.0
+        nsep = self.nsep
+
+        sep = (high - low)/nsep
+
+        ### quantised variable
+        ### ns*b,m
+        xz_int = (xz.clip(low,high-0.001) - low)//sep
+        xz_noise_new = (xz_int)*sep + low
+
+
+        ### OOD penalisation
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+
+
+        ### resampled representation q( z|d )
+        xz_noise = (xz_noise_new - xz).detach() + xz + (torch.rand_like(xz)-0.5)*sep
+        
+        #### scroing with discrete version
+        # lpz_int = self.get_log_prior(xz_int)
+        
+        ####
+        # lpz_int = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        # lpz_int = lpz_int.sum((1,2))
+        ### using continous counterpart for training
+        # lpz = lpz_int
+
+
+        
+        # invsqsigma1
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        
+        ### R2
+        # prior_logsigma = torch.tensor(math.log(0.25),device=x.device)
+
+        ### noR
+  
+        # prior_logsigma = torch.tensor(math.log(0.8),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        
+        xz_input = torch.cat([torch.zeros_like(xz_noise[:,:1]),xz_noise[:,:-1]],1)
+        xz_input = self.comp_out2(xz_input) + self.transformer.wpe2(torch.arange(nm,device=x.device))
+        
+        x = xz_input
+        for block in self.transformer.hp:
+            x = block(x,x)
+        x = self.transformer.ln_f3(x)
+        # y = self.comp_in2(x)
+
+        y = x[:,:,:self.nm_a]
+
+
+        lpe2 = -0.5*invsqsigma*(y - y.clip(low,high)).square().sum((1,2))
+        lpz  = (-0.5*invsqsigma*(y - xz_noise).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum((1,2))
+        lpz  = lpz.reshape(ns,-1)
+        lpe2 = lpe2.reshape(ns,-1)
+        
+        zgrid = torch.linspace(low,high,nsep,device=x.device)[None,None,None,:]
+
+        v = (-0.5*invsqsigma*(y.unsqueeze(-1) - zgrid).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).log_softmax(-1)
+        lpz_int = torch.einsum('btec,btec->b',torch.eye(nsep,device=x.device)[xz_int.long()], v)
+        # lpz_int = torch.einsum('btec,btec->bt',torch.eye(nsep,device=x.device)[xz_int.long()], v)
+        # print(lpz.shape,lpz_int.shape)
+
+
+        # lpz = (-0.5*invsqsigma*(xz_noise.reshape(ns*b,-1) - 0.).square()  - prior_logsigma - 0.5*math.log(2*math.pi) ).sum(-1)
+
+
+        prefix = self.transformer.comp_out(xz_noise)
+        _disabled = 0
+        _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            # print(v)
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        lpz_int = lpz_int.reshape(ns,-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz_int 
+            # loss = lpy
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            # loss = lpy + lpz + lpe
+            loss = lpy + lpz_int + lpe + lpe2
+            loss = -loss.mean() / t
+
+        return logits, loss       
+
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+        # lprior = 
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+
+        x = self.transformer.ln_f(x)
+
+
+        logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpy = -loss.reshape((ns,-1,t)).sum(-1)        
+        return logits,lpy
+
+
+
+
+
+class LGT003(GPT):
+    '''
+    same as LGT001B but adding a prior to discrete code
+    same as LGT001 but nsep=9 (less frequent grid)
+    LGT: latent generative transformer
+
+    same as 248N but with code refactored into encoder and decoder
+    same as 248K but using 6 5-length vectors 
+    same as 248J but normalising the encoder output
+    same as 248H but splitting latent to 3 vector of lenght 10
+    same as 248F but adding encoder loss
+    same as 248 but using 30 unit of 50 levels
+    same as 247 but casting the float number to grid
+    same as 245 but splitting the dimension into 12 ld vectors
+    ne = 384 = 12 * 32
+
+
+    same as 245 but more stringently disabling parts of latent with param nm_a
+    same as 241 but more compression oriented
+    same as 235 but using a flat top normal distribution
+    same as 231 but adding a latent context graph to be used
+    same as 174 but using a importance sampling gradient estimator
+    same as 172 but ablating the attention module
+    same as 141D but with a symbolic layer at the end, mixing rank-1 linear map.
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        config.nm = nm = 6
+        self.nm = nm 
+        self.ns = 3
+        self.nm_a = nm_a = config.n_embd
+        self.nm_a = nm_a = 5 ### R2
+        self.nsep = 5
+        self.nsep = nsep = 9
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wme = nn.Embedding(500, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*2, config.n_embd),
+            comp_in = nn.Linear(config.n_embd, nm_a,bias=False),
+            comp_out = nn.Linear(nm_a,config.n_embd, bias=False),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            h1 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        config = copy.copy(config)
+        config.block_size = nm*nm_a
+        self.transformer2 = nn.ModuleDict(dict(
+            wte = nn.Embedding(nsep, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block235(config) for _ in range(config.n_layer)]),
+            # hp = nn.ModuleList([Block235(config) for _ in range(config.n_layer)] ),
+            # hlast = Block231(config),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            lm_head = nn.Linear(config.n_embd, vmax, bias=False),
+
+        ))
+        self.transformer2.wte.weight = self.transformer2.lm_head.weight 
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1),device=x.device))
+
+        self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item(), self.prior_logsigma.exp().item(), self.post_logsigma.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # ns = 3
+        # ns = 6
+        ns = self.ns
+        nm = self.nm
+
+        idx = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        # t = t + nm
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + nm # shape (t)
+
+        # forward the GPT model itself
+        idx1 = torch.cat([idx, torch.ones_like(idx[:,:nm]).long()*(self.vmax-1)],dim=1)
+
+        tok_emb = self.transformer.wte(idx1) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        x0 = x
+        ### calculate the last memory context vectors
+        x = x0
+        for block in self.transformer.h1:
+            x = block(x,x)
+        x = self.transformer.ln_f2(x)
+
+        ### truncating the output to desired dimension
+        xz = x[:,-nm:]
+        xz = xz[:,:,:self.nm_a]
+
+
+        ### design the discrete codebook
+        low = -3.0
+        high = 3.0
+        nsep = self.nsep
+
+        sep = (high - low)/nsep
+
+        ### quantised variable
+        ### ns*b,m
+        xz_int = (xz.clip(low,high-0.001) - low)//sep
+        xz_noise_new = (xz_int)*sep + low
+
+
+        prior_logsigma = torch.tensor(math.log(0.5),device=x.device)
+        invsqsigma = 1./(2*prior_logsigma).exp()
+        
+        ### resampled representation q( z|d )
+        xz_noise = (xz_noise_new - xz).detach() + xz + (torch.rand_like(xz)-0.5)*sep
+
+        ## b,t
+        ### gradient of log_p encoder: q(e_y|d)
+        lpe = -0.5*invsqsigma*(xz - xz.clip(low,high)).square().sum(-1)
+        lpz = self.get_log_prior(xz_int, xz_noise)
+        
+        
+
+
+
+        prefix = self.transformer.comp_out(xz_noise)
+        _disabled = 0
+        # _disabled = 1;  print('[DEBUG]Disabling the latent!!!!!!!!------------')
+        if _disabled:
+            ### quality checking the noise
+            v,_=torch.histogram((xz_noise-xz).cpu().float(), torch.linspace(-3*sep,3*sep,20))
+            # print(xz.max(),xz.min())
+            # # v,_=torch.histogram(xz_noise.cpu().float(),torch.linspace(low,high,nsep))
+            # print(v)
+            prefix = prefix.flip((0,))
+
+        targetss = targets[None].repeat((ns,1,1,1))
+
+        ### decoder loss
+        logits, lpy = self.decode_with_prefix(prefix,idx,targetss)
+        lpz = lpz.reshape(ns,-1)
+        lpe = lpe.reshape(ns,-1,nm).sum(-1)
+
+        if not self.training:
+            # print(lpy.mean().item(),lpz.mean().item(),lpq.mean().item())
+            # loss = lpy + lpz - lpq
+            loss = lpy + lpz
+            # loss = lpy
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = lpy
+            loss = lpy + lpz + lpe
+            loss = -loss.mean() / t
+        return logits, loss       
+
+    def get_log_prior(self, xz_int, xz_noise):
+        ### (ns*b,m,e)
+        ### uniform prior
+        lpz = math.log(1./self.nsep) + torch.zeros_like(xz_int)
+        lpz = lpz.sum(-1)
+        ### (ns*b,m)
+        bsize = self.nm*self.nm_a
+        idx = xz_int.reshape(-1, self.nm*self.nm_a).long()
+        targets = idx
+        idx = torch.cat([torch.zeros_like(idx[:,:1]).long(),idx[:,:-1]],1)
+        pos = torch.arange(0, bsize, dtype=torch.long, device=idx.device)
+        
+
+        tok_emb = self.transformer2.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer2.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        for block in self.transformer2.h0:
+            x = block(x,x)
+        x = self.transformer2.ln_f(x)
+
+        logits = self.transformer2.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpz = -loss.reshape((-1,bsize)).sum(-1)        
+        return lpz
+
+    def decode_with_prefix(self, prefix, idx, targets):
+        device = idx.device
+        b, t  = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        ns = self.ns
+        nm = self.nm
+
+        #### decoding the sequence based on the prefix
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t+nm, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+
+        tok_emb = torch.cat([prefix, tok_emb],dim=1)
+        # lprior = 
+
+        x = tok_emb + pos_emb
+        for block in self.transformer.h0:
+            x = block(x,x)
+
+        x = x[:,nm:]
+
+        x = self.transformer.ln_f(x)
+
+
+        logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+        lpy = -loss.reshape((ns,-1,t)).sum(-1)        
+        return logits,lpy
+
+import copy
+
+
+
+
+class GPT141D(GPT):
+    '''
+    same as 141 but adding vector norm regularisation at the end
+    same as 140 but using static displacement vector in MLP 
+    same as 131 but using fully replaced MLP, and linear MLP activation and maps
+    same as 117 but trying to use a local representation instead of a global one
+    Kernellising the MLP activation function s(k) to be rank 1 bilinear kernels
+    same as GPT102G but introducing a gaussian approximation of bernoulli variables
+    Preprocessed token
+    '''
+
+    def __init__(self, config, vmax = None,bsize=None):
+        super(GPT,self).__init__()
+
+        if vmax is None:
+
+            assert config.vocab_size is not None
+            vmax = config.vocab_size
+        if bsize is None:
+            assert config.block_size is not None
+            bsize = config.block_size
+        self.config = config = copy.copy(config)
+        config.vocab_size = vmax
+        config.block_size= bsize
+
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            
+            # h0 = nn.ModuleList([Block140(config) for _ in range(1)]),
+            h0 = nn.ModuleList([Block117(config) for _ in range(1)]),
+            # h1 = nn.ModuleList([Block117(config) for _ in range(config.n_layer-1)] +  [Block130(config) for _ in range(1)]),
+            h1 = nn.ModuleList([Block141(config) for _ in range(config.n_layer-2) ] +[Block141(config)]),
+            # +  [Block130(config) for _ in range(1)]),
+            # h0 = nn.ModuleList([Block110(config) for _ in range(1)]),
+            # h1 = nn.ModuleList([Block110(config) for _ in range(config.n_layer-2)] + [Block110(config) for _ in range(1)] + [Block102G(config) for _ in range(1)]),
+            # h2 = nn.ModuleList([Block110(config) for _ in range(1)]),
+            # hlast = Block102G(config) ,
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.lm_norm = nn.Linear(1, config.vocab_size, bias=True)
+        # self.lm_null = nn.Linear(1, config.vocab_size, bias=False)
+        # self.norm_m = nn.Parameter(torch.tensor(7.5))
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+    def forward(self, idx, targets=None):
+        if self.reset and not self.training:
+            # print([self.norm_m.item(),self.norm_w.item(),self.norm_b.item()])
+            print([self.norm_w.exp().item()])
+            self.reset = False
+        if self.training:
+            self.reset = True
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
+        x = tok_emb + pos_emb
+
+        # ns = 10
+        ns = 3
+        x = x[None].repeat((ns,1,1,1)).reshape((-1,x.shape[1],x.shape[2]))
+        x0 = x
+
+        ## pre process the token to 
+        x = x0
+        for block in self.transformer.h0:
+            x = block(x,x0)
+        x1 = x
+        
+        x = x1
+        for block in self.transformer.h1:
+            x = block(x,x1)
+
+
+
+        if targets is not None:
+            # logits = (x*w)
+            logits = self.lm_head(x*self.norm_w.exp())    
+            # logits = logits  -(-self.lm_norm(xns.unsqueeze(-1))).square()
+            ###(bte)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets[None].repeat((ns,1,1,1)).reshape(-1), ignore_index=-1,reduction='none')
+
+            loss = loss.mean()
+
+        return logits, loss        
+
 
 class GPT248M(GPT):
     '''

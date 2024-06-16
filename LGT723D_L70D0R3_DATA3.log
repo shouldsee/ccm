@@ -1,0 +1,2840 @@
+Overriding config with config/train_novel_char3.py:
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-novel-char3'
+eval_interval = 250 # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10 # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False # override via command line if you like
+wandb_project = 'novel'
+wandb_run_name = 'novel'
+
+dataset = 'novel_char3'
+gradient_accumulation_steps = 1
+# gradient_accumulation_steps = 6
+gradient_accumulation_steps = 12
+# batch_size = 12
+batch_size = 2
+# batch_size = 1
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 64 # context of up to 256 previous characters
+block_size = 1024 # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+# n_embd = 182
+dropout = 0.2
+
+# learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+learning_rate = 1e-4 # with baby networks can afford to go a bit higher
+
+# max_iters = 5000
+# lr_decay_iters = 5000 # make equal to max_iters usually
+
+max_iters = 500000
+lr_decay_iters = 500000 # make equal to max_iters usually
+
+min_lr = 1e-5 # learning_rate / 10 usually
+beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100 # not super necessary potentially
+
+# on macbook also add
+# device = 'cpu'  # run on cpu only
+# compile = False # do not torch compile the model
+# init_from ='resume'
+
+
+'''
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM251_4bfeb7b3e1b9c46a2542bb9406173e22 --model=CCM251
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM253_01b622029bb00e0dc9206cae3b0ab559 --model=CCM253 
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559 --model=CCM276
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM278_a97bfe077b316033e3604831d5ad371e --model=CCM278
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM305_52efa1def80492f81622f536ac701226 --model=CCM305
+
+
+out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559
+
+'''
+#### python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+Overriding: init_from = scratch
+Overriding: compile = False
+Overriding: model = LGT723D
+Overriding: n_layer = 70
+Overriding: n_head = 12
+Overriding: share_layer = False
+Overriding: always_save_checkpoint = True
+Overriding: max_iters = 2500999
+Overriding: best_val_loss_force = 10.001
+Overriding: min_lr = 1e-05
+Overriding: dropout = 0.0
+Overriding: eval_interval = 50
+Overriding: force_resave = 0
+Overriding: random_seed = 3
+tokens per iteration will be: 24,576
+found vocab_size = 73440 (inside data/novel_char3/meta.pkl)
+out_dir: out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+Initializing a new model from scratch
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+num decayed parameter tensors: 178, with 111,869,184 parameters
+num non-decayed parameter tensors: 109, with 20,671,873 parameters
+using fused AdamW: True
+------average encoder activity 0.000
+-----------average decoder density 0.0000
+step 0: train loss 5.6483, val loss 5.6469
+model:LGT723D iter 0: loss 5.6846, time 48934.37ms, mfu -100.00%
+model:LGT723D iter 10: loss 5.4309, time 3683.56ms, mfu 2.40%
+model:LGT723D iter 20: loss 5.3144, time 3072.41ms, mfu 2.45%
+model:LGT723D iter 30: loss 5.2495, time 3603.76ms, mfu 2.45%
+model:LGT723D iter 40: loss 5.1878, time 3651.34ms, mfu 2.45%
+------average encoder activity 0.000
+-----------average decoder density 0.3562
+step 50: train loss 5.0777, val loss 5.0658
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 50: loss 5.0366, time 51009.14ms, mfu 2.22%
+model:LGT723D iter 60: loss 4.9139, time 3248.88ms, mfu 2.27%
+model:LGT723D iter 70: loss 4.7998, time 3609.61ms, mfu 2.29%
+model:LGT723D iter 80: loss 4.5094, time 3635.37ms, mfu 2.30%
+model:LGT723D iter 90: loss 4.4838, time 3127.55ms, mfu 2.35%
+------average encoder activity 0.000
+-----------average decoder density 0.2548
+step 100: train loss 4.2962, val loss 4.3061
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 100: loss 4.2614, time 51289.87ms, mfu 2.14%
+model:LGT723D iter 110: loss 4.1443, time 3566.27ms, mfu 2.17%
+model:LGT723D iter 120: loss 4.0695, time 3074.67ms, mfu 2.24%
+model:LGT723D iter 130: loss 4.0962, time 3444.71ms, mfu 2.27%
+model:LGT723D iter 140: loss 4.0105, time 3456.00ms, mfu 2.30%
+------average encoder activity 0.001
+-----------average decoder density 0.1367
+step 150: train loss 3.9687, val loss 3.9403
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 150: loss 3.8796, time 51305.72ms, mfu 2.09%
+model:LGT723D iter 160: loss 3.7462, time 2684.25ms, mfu 2.21%
+model:LGT723D iter 170: loss 3.8560, time 2677.20ms, mfu 2.32%
+model:LGT723D iter 180: loss 3.8728, time 3102.49ms, mfu 2.37%
+model:LGT723D iter 190: loss 4.0863, time 3086.12ms, mfu 2.42%
+------average encoder activity 0.023
+-----------average decoder density 0.1118
+step 200: train loss 3.8926, val loss 3.8416
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 200: loss 3.8884, time 50502.98ms, mfu 2.20%
+model:LGT723D iter 210: loss 3.7816, time 3081.21ms, mfu 2.26%
+model:LGT723D iter 220: loss 3.7675, time 3179.85ms, mfu 2.32%
+model:LGT723D iter 230: loss 3.7233, time 3009.00ms, mfu 2.38%
+model:LGT723D iter 240: loss 3.8336, time 3746.41ms, mfu 2.38%
+------average encoder activity 0.039
+-----------average decoder density 0.1161
+step 250: train loss 3.8411, val loss 3.7894
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 250: loss 3.7292, time 51610.38ms, mfu 2.16%
+model:LGT723D iter 260: loss 3.8195, time 3110.35ms, mfu 2.23%
+model:LGT723D iter 270: loss 3.7837, time 3326.26ms, mfu 2.27%
+model:LGT723D iter 280: loss 3.8533, time 3083.03ms, mfu 2.33%
+model:LGT723D iter 290: loss 3.7076, time 2773.38ms, mfu 2.41%
+------average encoder activity 0.049
+-----------average decoder density 0.1052
+step 300: train loss 3.7647, val loss 3.7131
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 300: loss 4.0964, time 51994.22ms, mfu 2.19%
+model:LGT723D iter 310: loss 3.6580, time 3340.80ms, mfu 2.24%
+model:LGT723D iter 320: loss 3.8854, time 3456.92ms, mfu 2.27%
+model:LGT723D iter 330: loss 3.9860, time 3417.13ms, mfu 2.30%
+model:LGT723D iter 340: loss 3.6536, time 2790.56ms, mfu 2.39%
+------average encoder activity 0.059
+-----------average decoder density 0.1125
+step 350: train loss 3.7172, val loss 3.6624
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 350: loss 3.6756, time 51117.55ms, mfu 2.17%
+model:LGT723D iter 360: loss 3.7140, time 3567.57ms, mfu 2.20%
+model:LGT723D iter 370: loss 3.7590, time 2744.50ms, mfu 2.30%
+model:LGT723D iter 380: loss 3.8384, time 3099.50ms, mfu 2.35%
+model:LGT723D iter 390: loss 4.0082, time 3254.00ms, mfu 2.39%
+------average encoder activity 0.068
+-----------average decoder density 0.1013
+step 400: train loss 3.6794, val loss 3.6263
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 400: loss 3.8312, time 51034.37ms, mfu 2.17%
+model:LGT723D iter 410: loss 3.5310, time 3501.03ms, mfu 2.21%
+model:LGT723D iter 420: loss 3.4453, time 3700.85ms, mfu 2.22%
+model:LGT723D iter 430: loss 3.7186, time 3143.11ms, mfu 2.28%
+model:LGT723D iter 440: loss 3.4625, time 3672.05ms, mfu 2.30%
+------average encoder activity 0.076
+-----------average decoder density 0.0830
+step 450: train loss 3.6073, val loss 3.6064
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 450: loss 3.5365, time 51342.21ms, mfu 2.08%
+model:LGT723D iter 460: loss 3.6278, time 3155.30ms, mfu 2.15%
+model:LGT723D iter 470: loss 3.6727, time 3620.68ms, mfu 2.18%
+model:LGT723D iter 480: loss 3.5485, time 3632.88ms, mfu 2.21%
+model:LGT723D iter 490: loss 3.6954, time 3195.88ms, mfu 2.26%
+------average encoder activity 0.084
+-----------average decoder density 0.0788
+step 500: train loss 3.5892, val loss 3.5506
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 500: loss 3.4112, time 51506.07ms, mfu 2.06%
+model:LGT723D iter 510: loss 3.8718, time 3602.34ms, mfu 2.10%
+model:LGT723D iter 520: loss 3.6672, time 3214.93ms, mfu 2.16%
+model:LGT723D iter 530: loss 3.4046, time 3551.39ms, mfu 2.19%
+model:LGT723D iter 540: loss 3.3441, time 3535.45ms, mfu 2.22%
+------average encoder activity 0.091
+-----------average decoder density 0.0855
+step 550: train loss 3.5640, val loss 3.5170
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 550: loss 3.5699, time 50805.64ms, mfu 2.02%
+model:LGT723D iter 560: loss 3.5048, time 3567.17ms, mfu 2.07%
+model:LGT723D iter 570: loss 3.6456, time 3537.49ms, mfu 2.11%
+model:LGT723D iter 580: loss 3.4724, time 3027.63ms, mfu 2.19%
+model:LGT723D iter 590: loss 3.5138, time 3052.20ms, mfu 2.26%
+------average encoder activity 0.099
+-----------average decoder density 0.0736
+step 600: train loss 3.5354, val loss 3.4909
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 600: loss 3.3316, time 51012.57ms, mfu 2.05%
+model:LGT723D iter 610: loss 3.5661, time 3473.94ms, mfu 2.10%
+model:LGT723D iter 620: loss 3.4542, time 3250.69ms, mfu 2.16%
+model:LGT723D iter 630: loss 3.5958, time 3657.81ms, mfu 2.19%
+model:LGT723D iter 640: loss 3.3270, time 3633.49ms, mfu 2.21%
+------average encoder activity 0.108
+-----------average decoder density 0.0730
+step 650: train loss 3.4649, val loss 3.4507
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 650: loss 3.3726, time 51261.66ms, mfu 2.01%
+model:LGT723D iter 660: loss 3.5721, time 2668.81ms, mfu 2.14%
+model:LGT723D iter 670: loss 3.7340, time 3144.24ms, mfu 2.21%
+model:LGT723D iter 680: loss 3.4049, time 2943.79ms, mfu 2.29%
+model:LGT723D iter 690: loss 3.4107, time 3324.65ms, mfu 2.32%
+------average encoder activity 0.119
+-----------average decoder density 0.0783
+step 700: train loss 3.4680, val loss 3.4349
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 700: loss 3.5345, time 52739.05ms, mfu 2.11%
+model:LGT723D iter 710: loss 3.2757, time 2710.71ms, mfu 2.22%
+model:LGT723D iter 720: loss 3.2419, time 2678.59ms, mfu 2.33%
+model:LGT723D iter 730: loss 3.2513, time 3158.08ms, mfu 2.38%
+model:LGT723D iter 740: loss 3.5429, time 3496.49ms, mfu 2.39%
+------average encoder activity 0.128
+-----------average decoder density 0.0761
+step 750: train loss 3.4897, val loss 3.4196
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 750: loss 3.3593, time 51615.50ms, mfu 2.17%
+model:LGT723D iter 760: loss 3.3415, time 3165.87ms, mfu 2.23%
+model:LGT723D iter 770: loss 3.2670, time 3652.85ms, mfu 2.25%
+model:LGT723D iter 780: loss 3.5248, time 3526.31ms, mfu 2.28%
+model:LGT723D iter 790: loss 3.3737, time 2928.28ms, mfu 2.35%
+------average encoder activity 0.134
+-----------average decoder density 0.0749
+step 800: train loss 3.4097, val loss 3.3709
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 800: loss 3.2269, time 51111.14ms, mfu 2.13%
+model:LGT723D iter 810: loss 3.4176, time 3525.28ms, mfu 2.17%
+model:LGT723D iter 820: loss 3.5608, time 2745.14ms, mfu 2.28%
+model:LGT723D iter 830: loss 3.4025, time 3103.13ms, mfu 2.33%
+model:LGT723D iter 840: loss 3.4214, time 3113.14ms, mfu 2.38%
+------average encoder activity 0.144
+-----------average decoder density 0.0802
+step 850: train loss 3.3971, val loss 3.3739
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 850: loss 3.7537, time 50907.73ms, mfu 2.16%
+model:LGT723D iter 860: loss 3.5524, time 3535.15ms, mfu 2.20%
+model:LGT723D iter 870: loss 3.6723, time 3691.75ms, mfu 2.22%
+model:LGT723D iter 880: loss 3.6620, time 3093.89ms, mfu 2.28%
+model:LGT723D iter 890: loss 3.2742, time 3575.79ms, mfu 2.30%
+------average encoder activity 0.151
+-----------average decoder density 0.0816
+step 900: train loss 3.3809, val loss 3.3565
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 900: loss 3.4330, time 51043.26ms, mfu 2.09%
+model:LGT723D iter 910: loss 3.4808, time 3009.73ms, mfu 2.17%
+model:LGT723D iter 920: loss 3.3269, time 3466.73ms, mfu 2.21%
+model:LGT723D iter 930: loss 3.2656, time 3534.08ms, mfu 2.24%
+model:LGT723D iter 940: loss 3.4698, time 3451.92ms, mfu 2.27%
+------average encoder activity 0.163
+-----------average decoder density 0.0791
+step 950: train loss 3.3935, val loss 3.3786
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 950: loss 3.2722, time 49906.92ms, mfu 2.06%
+model:LGT723D iter 960: loss 3.0887, time 2891.51ms, mfu 2.16%
+model:LGT723D iter 970: loss 3.4202, time 3380.39ms, mfu 2.21%
+model:LGT723D iter 980: loss 3.3431, time 3489.21ms, mfu 2.24%
+model:LGT723D iter 990: loss 3.5347, time 3566.15ms, mfu 2.26%
+------average encoder activity 0.171
+-----------average decoder density 0.0902
+step 1000: train loss 3.3458, val loss 3.3019
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1000: loss 3.4659, time 50641.15ms, mfu 2.06%
+model:LGT723D iter 1010: loss 3.3991, time 2573.01ms, mfu 2.19%
+model:LGT723D iter 1020: loss 3.3458, time 2536.27ms, mfu 2.32%
+model:LGT723D iter 1030: loss 3.4664, time 3122.88ms, mfu 2.37%
+model:LGT723D iter 1040: loss 3.4491, time 3419.64ms, mfu 2.40%
+------average encoder activity 0.178
+-----------average decoder density 0.0856
+step 1050: train loss 3.3404, val loss 3.2781
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1050: loss 3.4897, time 50910.11ms, mfu 2.17%
+model:LGT723D iter 1060: loss 3.0986, time 3153.61ms, mfu 2.24%
+model:LGT723D iter 1070: loss 3.0847, time 2560.72ms, mfu 2.36%
+model:LGT723D iter 1080: loss 2.5716, time 2728.29ms, mfu 2.45%
+model:LGT723D iter 1090: loss 3.6223, time 3405.43ms, mfu 2.46%
+------average encoder activity 0.185
+-----------average decoder density 0.0907
+step 1100: train loss 3.3271, val loss 3.2690
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1100: loss 3.5902, time 50832.77ms, mfu 2.23%
+model:LGT723D iter 1110: loss 3.2675, time 3518.34ms, mfu 2.26%
+model:LGT723D iter 1120: loss 3.4810, time 2929.55ms, mfu 2.34%
+model:LGT723D iter 1130: loss 3.1823, time 2652.90ms, mfu 2.44%
+model:LGT723D iter 1140: loss 3.1181, time 3161.86ms, mfu 2.47%
+------average encoder activity 0.196
+-----------average decoder density 0.0932
+step 1150: train loss 3.3099, val loss 3.2867
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1150: loss 3.2698, time 50190.87ms, mfu 2.24%
+model:LGT723D iter 1160: loss 3.6547, time 3193.28ms, mfu 2.30%
+model:LGT723D iter 1170: loss 3.3789, time 2918.46ms, mfu 2.37%
+model:LGT723D iter 1180: loss 3.1153, time 3278.91ms, mfu 2.40%
+model:LGT723D iter 1190: loss 3.1975, time 3130.00ms, mfu 2.44%
+------average encoder activity 0.203
+-----------average decoder density 0.0984
+step 1200: train loss 3.2881, val loss 3.2409
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1200: loss 3.2355, time 51178.94ms, mfu 2.22%
+model:LGT723D iter 1210: loss 2.9879, time 3630.89ms, mfu 2.24%
+model:LGT723D iter 1220: loss 3.4405, time 3547.76ms, mfu 2.26%
+model:LGT723D iter 1230: loss 3.0776, time 3214.72ms, mfu 2.31%
+model:LGT723D iter 1240: loss 3.3869, time 2975.25ms, mfu 2.38%
+------average encoder activity 0.212
+-----------average decoder density 0.1001
+step 1250: train loss 3.2717, val loss 3.2384
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1250: loss 3.2421, time 50344.01ms, mfu 2.16%
+model:LGT723D iter 1260: loss 2.9100, time 3334.62ms, mfu 2.21%
+model:LGT723D iter 1270: loss 2.9184, time 3445.33ms, mfu 2.24%
+model:LGT723D iter 1280: loss 3.5410, time 3436.38ms, mfu 2.28%
+model:LGT723D iter 1290: loss 2.7334, time 3057.12ms, mfu 2.34%
+------average encoder activity 0.218
+-----------average decoder density 0.1014
+step 1300: train loss 3.2605, val loss 3.2177
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1300: loss 3.4581, time 50764.15ms, mfu 2.12%
+model:LGT723D iter 1310: loss 3.2429, time 3013.78ms, mfu 2.20%
+model:LGT723D iter 1320: loss 2.9309, time 3165.67ms, mfu 2.26%
+model:LGT723D iter 1330: loss 3.1399, time 3028.91ms, mfu 2.33%
+model:LGT723D iter 1340: loss 3.4140, time 2916.11ms, mfu 2.40%
+------average encoder activity 0.225
+-----------average decoder density 0.1053
+step 1350: train loss 3.2512, val loss 3.2166
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1350: loss 3.1499, time 53797.71ms, mfu 2.18%
+model:LGT723D iter 1360: loss 2.8581, time 2724.27ms, mfu 2.28%
+model:LGT723D iter 1370: loss 3.3798, time 2913.35ms, mfu 2.36%
+model:LGT723D iter 1380: loss 2.8772, time 3360.71ms, mfu 2.39%
+model:LGT723D iter 1390: loss 3.3179, time 3087.96ms, mfu 2.43%
+------average encoder activity 0.236
+-----------average decoder density 0.1063
+step 1400: train loss 3.2319, val loss 3.2191
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1400: loss 3.3628, time 49908.82ms, mfu 2.21%
+model:LGT723D iter 1410: loss 3.3806, time 3346.06ms, mfu 2.25%
+model:LGT723D iter 1420: loss 3.0919, time 3013.82ms, mfu 2.32%
+model:LGT723D iter 1430: loss 3.1931, time 2661.93ms, mfu 2.42%
+model:LGT723D iter 1440: loss 3.5434, time 2816.85ms, mfu 2.49%
+------average encoder activity 0.243
+-----------average decoder density 0.1121
+step 1450: train loss 3.2453, val loss 3.2032
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1450: loss 3.5361, time 51626.17ms, mfu 2.26%
+model:LGT723D iter 1460: loss 3.0245, time 3112.66ms, mfu 2.32%
+model:LGT723D iter 1470: loss 3.1955, time 2989.20ms, mfu 2.38%
+model:LGT723D iter 1480: loss 3.2154, time 3135.72ms, mfu 2.43%
+model:LGT723D iter 1490: loss 3.1922, time 2986.03ms, mfu 2.48%
+------average encoder activity 0.252
+-----------average decoder density 0.1139
+step 1500: train loss 3.2455, val loss 3.2032
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1500: loss 3.2476, time 50340.25ms, mfu 2.25%
+model:LGT723D iter 1510: loss 3.4705, time 2606.15ms, mfu 2.36%
+model:LGT723D iter 1520: loss 3.1062, time 3122.07ms, mfu 2.41%
+model:LGT723D iter 1530: loss 2.8500, time 3273.57ms, mfu 2.44%
+model:LGT723D iter 1540: loss 3.7692, time 3482.55ms, mfu 2.45%
+------average encoder activity 0.260
+-----------average decoder density 0.1164
+step 1550: train loss 3.2287, val loss 3.1968
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1550: loss 3.2460, time 50474.03ms, mfu 2.22%
+model:LGT723D iter 1560: loss 3.3599, time 3045.09ms, mfu 2.29%
+model:LGT723D iter 1570: loss 3.2815, time 3006.77ms, mfu 2.36%
+model:LGT723D iter 1580: loss 3.2480, time 3478.50ms, mfu 2.37%
+model:LGT723D iter 1590: loss 3.3067, time 2945.09ms, mfu 2.44%
+------average encoder activity 0.269
+-----------average decoder density 0.1244
+step 1600: train loss 3.1944, val loss 3.1771
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1600: loss 3.0495, time 54415.29ms, mfu 2.21%
+model:LGT723D iter 1610: loss 3.1918, time 2871.74ms, mfu 2.30%
+model:LGT723D iter 1620: loss 3.4155, time 3196.19ms, mfu 2.34%
+model:LGT723D iter 1630: loss 3.1236, time 3227.65ms, mfu 2.38%
+model:LGT723D iter 1640: loss 3.3544, time 2832.65ms, mfu 2.46%
+------average encoder activity 0.274
+-----------average decoder density 0.1184
+step 1650: train loss 3.1906, val loss 3.1953
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1650: loss 2.9864, time 50880.49ms, mfu 2.23%
+model:LGT723D iter 1660: loss 3.0340, time 2780.96ms, mfu 2.32%
+model:LGT723D iter 1670: loss 3.3747, time 3431.43ms, mfu 2.35%
+model:LGT723D iter 1680: loss 3.0635, time 3212.50ms, mfu 2.39%
+model:LGT723D iter 1690: loss 3.2194, time 3286.57ms, mfu 2.42%
+------average encoder activity 0.283
+-----------average decoder density 0.1258
+step 1700: train loss 3.1980, val loss 3.1747
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1700: loss 3.1731, time 53042.43ms, mfu 2.19%
+model:LGT723D iter 1710: loss 3.1584, time 3013.42ms, mfu 2.27%
+model:LGT723D iter 1720: loss 3.2465, time 3249.97ms, mfu 2.31%
+model:LGT723D iter 1730: loss 3.1348, time 2765.01ms, mfu 2.40%
+model:LGT723D iter 1740: loss 3.3262, time 2728.06ms, mfu 2.49%
+------average encoder activity 0.292
+-----------average decoder density 0.1268
+step 1750: train loss 3.1837, val loss 3.1563
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1750: loss 3.4015, time 50868.06ms, mfu 2.26%
+model:LGT723D iter 1760: loss 3.4086, time 3145.27ms, mfu 2.31%
+model:LGT723D iter 1770: loss 2.9447, time 3009.86ms, mfu 2.37%
+model:LGT723D iter 1780: loss 3.1346, time 2995.44ms, mfu 2.43%
+model:LGT723D iter 1790: loss 3.0004, time 2991.08ms, mfu 2.48%
+------average encoder activity 0.300
+-----------average decoder density 0.1316
+step 1800: train loss 3.1622, val loss 3.1665
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1800: loss 3.0241, time 50676.84ms, mfu 2.25%
+model:LGT723D iter 1810: loss 3.2682, time 2853.69ms, mfu 2.34%
+model:LGT723D iter 1820: loss 3.2336, time 2718.62ms, mfu 2.43%
+model:LGT723D iter 1830: loss 3.2563, time 3022.73ms, mfu 2.48%
+model:LGT723D iter 1840: loss 3.2383, time 3339.98ms, mfu 2.50%
+------average encoder activity 0.309
+-----------average decoder density 0.1291
+step 1850: train loss 3.1230, val loss 3.1312
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1850: loss 2.9849, time 50871.03ms, mfu 2.26%
+model:LGT723D iter 1860: loss 3.1760, time 3022.51ms, mfu 2.33%
+model:LGT723D iter 1870: loss 3.0190, time 2735.69ms, mfu 2.42%
+model:LGT723D iter 1880: loss 3.3475, time 2896.90ms, mfu 2.48%
+model:LGT723D iter 1890: loss 3.1878, time 3489.29ms, mfu 2.49%
+------average encoder activity 0.314
+-----------average decoder density 0.1341
+step 1900: train loss 3.1413, val loss 3.1334
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1900: loss 2.9066, time 50425.00ms, mfu 2.26%
+model:LGT723D iter 1910: loss 3.0883, time 3444.24ms, mfu 2.29%
+model:LGT723D iter 1920: loss 3.1582, time 3539.50ms, mfu 2.31%
+model:LGT723D iter 1930: loss 3.2066, time 3290.84ms, mfu 2.35%
+model:LGT723D iter 1940: loss 3.2913, time 2837.62ms, mfu 2.42%
+------average encoder activity 0.324
+-----------average decoder density 0.1306
+step 1950: train loss 3.1508, val loss 3.1084
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1950: loss 2.9750, time 51073.73ms, mfu 2.20%
+model:LGT723D iter 1960: loss 3.0065, time 3442.70ms, mfu 2.24%
+model:LGT723D iter 1970: loss 3.1146, time 3369.49ms, mfu 2.28%
+model:LGT723D iter 1980: loss 3.0737, time 3052.40ms, mfu 2.34%
+model:LGT723D iter 1990: loss 3.3402, time 2951.79ms, mfu 2.40%
+------average encoder activity 0.330
+-----------average decoder density 0.1354
+step 2000: train loss 3.1328, val loss 3.1108
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2000: loss 3.3520, time 50464.88ms, mfu 2.18%
+model:LGT723D iter 2010: loss 2.9931, time 2806.61ms, mfu 2.28%
+model:LGT723D iter 2020: loss 3.3286, time 2748.54ms, mfu 2.37%
+model:LGT723D iter 2030: loss 3.3651, time 2991.81ms, mfu 2.43%
+model:LGT723D iter 2040: loss 3.3033, time 3402.39ms, mfu 2.45%
+------average encoder activity 0.336
+-----------average decoder density 0.1378
+step 2050: train loss 3.1352, val loss 3.1272
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2050: loss 3.1208, time 51050.85ms, mfu 2.22%
+model:LGT723D iter 2060: loss 3.2184, time 3045.22ms, mfu 2.29%
+model:LGT723D iter 2070: loss 2.9329, time 2643.57ms, mfu 2.39%
+model:LGT723D iter 2080: loss 2.9888, time 2828.57ms, mfu 2.47%
+model:LGT723D iter 2090: loss 3.2962, time 3493.70ms, mfu 2.47%
+------average encoder activity 0.342
+-----------average decoder density 0.1538
+step 2100: train loss 3.1346, val loss 3.1096
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2100: loss 2.9377, time 50245.61ms, mfu 2.24%
+model:LGT723D iter 2110: loss 3.1487, time 3250.31ms, mfu 2.29%
+model:LGT723D iter 2120: loss 3.2567, time 3556.92ms, mfu 2.31%
+model:LGT723D iter 2130: loss 2.9683, time 3216.17ms, mfu 2.35%
+model:LGT723D iter 2140: loss 2.9867, time 3017.32ms, mfu 2.41%
+------average encoder activity 0.345
+-----------average decoder density 0.1372
+step 2150: train loss 3.1149, val loss 3.0901
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2150: loss 3.2172, time 50830.96ms, mfu 2.19%
+model:LGT723D iter 2160: loss 3.1883, time 3053.58ms, mfu 2.26%
+model:LGT723D iter 2170: loss 3.1080, time 3266.21ms, mfu 2.30%
+model:LGT723D iter 2180: loss 3.4421, time 3091.19ms, mfu 2.36%
+model:LGT723D iter 2190: loss 2.6463, time 3206.66ms, mfu 2.40%
+------average encoder activity 0.350
+-----------average decoder density 0.1568
+step 2200: train loss 3.0979, val loss 3.0830
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2200: loss 3.2652, time 52868.59ms, mfu 2.18%
+model:LGT723D iter 2210: loss 3.3431, time 2577.91ms, mfu 2.30%
+model:LGT723D iter 2220: loss 3.2545, time 2894.40ms, mfu 2.38%
+model:LGT723D iter 2230: loss 3.2305, time 3007.45ms, mfu 2.43%
+model:LGT723D iter 2240: loss 3.1309, time 2953.19ms, mfu 2.49%
+------average encoder activity 0.357
+-----------average decoder density 0.1557
+step 2250: train loss 3.1023, val loss 3.0811
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2250: loss 3.1637, time 50714.80ms, mfu 2.26%
+model:LGT723D iter 2260: loss 2.5067, time 3205.78ms, mfu 2.31%
+model:LGT723D iter 2270: loss 3.2917, time 3447.05ms, mfu 2.33%
+model:LGT723D iter 2280: loss 3.0164, time 3157.49ms, mfu 2.38%
+model:LGT723D iter 2290: loss 2.9116, time 3269.95ms, mfu 2.41%
+------average encoder activity 0.361
+-----------average decoder density 0.1498
+step 2300: train loss 3.0938, val loss 3.0815
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2300: loss 3.2697, time 51468.22ms, mfu 2.19%
+model:LGT723D iter 2310: loss 3.1359, time 3428.83ms, mfu 2.23%
+model:LGT723D iter 2320: loss 3.0487, time 3341.28ms, mfu 2.27%
+model:LGT723D iter 2330: loss 2.5924, time 3086.13ms, mfu 2.33%
+model:LGT723D iter 2340: loss 3.0272, time 3065.45ms, mfu 2.39%
+------average encoder activity 0.370
+-----------average decoder density 0.1648
+step 2350: train loss 3.0984, val loss 3.0967
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2350: loss 3.1601, time 52258.76ms, mfu 2.16%
+model:LGT723D iter 2360: loss 3.3137, time 2953.44ms, mfu 2.25%
+model:LGT723D iter 2370: loss 3.1677, time 3226.99ms, mfu 2.30%
+model:LGT723D iter 2380: loss 2.8265, time 3448.38ms, mfu 2.32%
+model:LGT723D iter 2390: loss 2.8851, time 3312.91ms, mfu 2.36%
+------average encoder activity 0.375
+-----------average decoder density 0.1481
+step 2400: train loss 3.0843, val loss 3.0888
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2400: loss 3.0430, time 50433.19ms, mfu 2.14%
+model:LGT723D iter 2410: loss 2.8518, time 2960.34ms, mfu 2.22%
+model:LGT723D iter 2420: loss 2.9487, time 3168.59ms, mfu 2.28%
+model:LGT723D iter 2430: loss 3.0921, time 3191.24ms, mfu 2.33%
+model:LGT723D iter 2440: loss 2.9287, time 2979.07ms, mfu 2.39%
+------average encoder activity 0.381
+-----------average decoder density 0.1662
+step 2450: train loss 3.0559, val loss 3.0503
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2450: loss 2.9074, time 50352.99ms, mfu 2.17%
+model:LGT723D iter 2460: loss 3.3207, time 2595.67ms, mfu 2.30%
+model:LGT723D iter 2470: loss 3.1366, time 2847.49ms, mfu 2.38%
+model:LGT723D iter 2480: loss 3.1043, time 2580.86ms, mfu 2.48%
+model:LGT723D iter 2490: loss 3.1151, time 2914.70ms, mfu 2.54%
+------average encoder activity 0.385
+-----------average decoder density 0.1527
+step 2500: train loss 3.0630, val loss 3.0659
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2500: loss 3.1088, time 51702.99ms, mfu 2.30%
+model:LGT723D iter 2510: loss 3.2634, time 3187.94ms, mfu 2.35%
+model:LGT723D iter 2520: loss 2.8355, time 3012.16ms, mfu 2.41%
+model:LGT723D iter 2530: loss 3.2413, time 3367.97ms, mfu 2.43%
+model:LGT723D iter 2540: loss 3.0252, time 2921.59ms, mfu 2.49%
+------average encoder activity 0.390
+-----------average decoder density 0.1777
+step 2550: train loss 3.0632, val loss 3.0331
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2550: loss 3.1392, time 52344.50ms, mfu 2.26%
+model:LGT723D iter 2560: loss 2.8789, time 2482.11ms, mfu 2.39%
+model:LGT723D iter 2570: loss 3.1749, time 3103.20ms, mfu 2.43%
+model:LGT723D iter 2580: loss 3.1747, time 3121.83ms, mfu 2.47%
+model:LGT723D iter 2590: loss 2.6808, time 2899.09ms, mfu 2.53%
+------average encoder activity 0.396
+-----------average decoder density 0.1665
+step 2600: train loss 3.0592, val loss 3.0588
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2600: loss 2.8428, time 53420.41ms, mfu 2.29%
+model:LGT723D iter 2610: loss 3.1970, time 2766.48ms, mfu 2.38%
+model:LGT723D iter 2620: loss 2.7902, time 2654.99ms, mfu 2.48%
+model:LGT723D iter 2630: loss 3.4031, time 2839.99ms, mfu 2.54%
+model:LGT723D iter 2640: loss 3.3424, time 2742.36ms, mfu 2.61%
+------average encoder activity 0.404
+-----------average decoder density 0.1626
+step 2650: train loss 3.0504, val loss 3.0447
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2650: loss 3.0660, time 51990.85ms, mfu 2.37%
+model:LGT723D iter 2660: loss 3.0755, time 3271.98ms, mfu 2.40%
+model:LGT723D iter 2670: loss 2.8379, time 2856.54ms, mfu 2.47%
+model:LGT723D iter 2680: loss 3.1413, time 3138.34ms, mfu 2.51%
+model:LGT723D iter 2690: loss 3.0887, time 2856.28ms, mfu 2.56%
+------average encoder activity 0.412
+-----------average decoder density 0.1797
+step 2700: train loss 3.0430, val loss 3.0326
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2700: loss 3.2239, time 50271.44ms, mfu 2.33%
+model:LGT723D iter 2710: loss 2.6483, time 3188.43ms, mfu 2.37%
+model:LGT723D iter 2720: loss 3.0003, time 3148.53ms, mfu 2.41%
+model:LGT723D iter 2730: loss 2.8739, time 2841.24ms, mfu 2.48%
+model:LGT723D iter 2740: loss 2.9219, time 3164.22ms, mfu 2.52%
+------average encoder activity 0.415
+-----------average decoder density 0.1704
+step 2750: train loss 3.0631, val loss 3.0211
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2750: loss 2.9473, time 51625.56ms, mfu 2.28%
+model:LGT723D iter 2760: loss 3.1217, time 3051.55ms, mfu 2.34%
+model:LGT723D iter 2770: loss 3.0177, time 3119.06ms, mfu 2.39%
+model:LGT723D iter 2780: loss 2.9687, time 2654.68ms, mfu 2.49%
+model:LGT723D iter 2790: loss 2.9920, time 3129.07ms, mfu 2.52%
+------average encoder activity 0.420
+-----------average decoder density 0.1713
+step 2800: train loss 3.0309, val loss 3.0045
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2800: loss 2.9612, time 50040.31ms, mfu 2.29%
+model:LGT723D iter 2810: loss 2.8853, time 3532.55ms, mfu 2.31%
+model:LGT723D iter 2820: loss 3.1983, time 3187.46ms, mfu 2.35%
+model:LGT723D iter 2830: loss 3.0044, time 2861.39ms, mfu 2.43%
+model:LGT723D iter 2840: loss 3.0211, time 3208.01ms, mfu 2.46%
+------average encoder activity 0.426
+-----------average decoder density 0.1605
+step 2850: train loss 3.0022, val loss 3.0251
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2850: loss 2.9441, time 50035.22ms, mfu 2.23%
+model:LGT723D iter 2860: loss 3.3497, time 3539.18ms, mfu 2.26%
+model:LGT723D iter 2870: loss 2.6543, time 3548.84ms, mfu 2.28%
+model:LGT723D iter 2880: loss 3.2011, time 3070.40ms, mfu 2.34%
+model:LGT723D iter 2890: loss 3.2088, time 3262.14ms, mfu 2.38%
+------average encoder activity 0.429
+-----------average decoder density 0.1910
+step 2900: train loss 3.0056, val loss 3.0010
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2900: loss 3.0955, time 50042.58ms, mfu 2.16%
+model:LGT723D iter 2910: loss 3.5844, time 3473.85ms, mfu 2.20%
+model:LGT723D iter 2920: loss 3.0580, time 3459.56ms, mfu 2.23%
+model:LGT723D iter 2930: loss 2.6236, time 2994.59ms, mfu 2.31%
+model:LGT723D iter 2940: loss 2.9871, time 2761.55ms, mfu 2.40%
+------average encoder activity 0.437
+-----------average decoder density 0.2006
+step 2950: train loss 3.0119, val loss 3.0268
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2950: loss 3.1661, time 50545.95ms, mfu 2.17%
+model:LGT723D iter 2960: loss 3.1139, time 3449.31ms, mfu 2.21%
+model:LGT723D iter 2970: loss 3.0818, time 3579.14ms, mfu 2.24%
+model:LGT723D iter 2980: loss 2.7299, time 3125.89ms, mfu 2.30%
+model:LGT723D iter 2990: loss 2.6382, time 3218.43ms, mfu 2.34%
+------average encoder activity 0.443
+-----------average decoder density 0.1933
+step 3000: train loss 2.9983, val loss 2.9921
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3000: loss 3.0901, time 49669.94ms, mfu 2.13%
+model:LGT723D iter 3010: loss 2.6679, time 3325.44ms, mfu 2.18%
+model:LGT723D iter 3020: loss 3.0249, time 3359.44ms, mfu 2.22%
+model:LGT723D iter 3030: loss 3.2244, time 3114.34ms, mfu 2.29%
+model:LGT723D iter 3040: loss 3.1485, time 3004.12ms, mfu 2.35%
+------average encoder activity 0.449
+-----------average decoder density 0.1806
+step 3050: train loss 3.0083, val loss 2.9806
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3050: loss 3.2524, time 49913.17ms, mfu 2.13%
+model:LGT723D iter 3060: loss 2.8459, time 3019.82ms, mfu 2.21%
+model:LGT723D iter 3070: loss 2.8930, time 3006.12ms, mfu 2.29%
+model:LGT723D iter 3080: loss 2.7624, time 2615.44ms, mfu 2.40%
+model:LGT723D iter 3090: loss 3.0193, time 2982.39ms, mfu 2.45%
+------average encoder activity 0.455
+-----------average decoder density 0.1830
+step 3100: train loss 2.9772, val loss 2.9781
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3100: loss 2.8660, time 50376.71ms, mfu 2.23%
+model:LGT723D iter 3110: loss 3.0477, time 3543.71ms, mfu 2.25%
+model:LGT723D iter 3120: loss 2.6808, time 3507.45ms, mfu 2.28%
+model:LGT723D iter 3130: loss 2.8181, time 2887.67ms, mfu 2.36%
+model:LGT723D iter 3140: loss 3.0587, time 3121.88ms, mfu 2.41%
+------average encoder activity 0.459
+-----------average decoder density 0.1819
+step 3150: train loss 3.0029, val loss 3.0015
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3150: loss 3.0428, time 49638.96ms, mfu 2.18%
+model:LGT723D iter 3160: loss 3.0007, time 3572.45ms, mfu 2.21%
+model:LGT723D iter 3170: loss 2.9391, time 3560.60ms, mfu 2.24%
+model:LGT723D iter 3180: loss 3.1819, time 3019.24ms, mfu 2.31%
+model:LGT723D iter 3190: loss 3.0430, time 3147.78ms, mfu 2.36%
+------average encoder activity 0.463
+-----------average decoder density 0.1819
+step 3200: train loss 2.9937, val loss 2.9810
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3200: loss 2.6612, time 49793.22ms, mfu 2.14%
+model:LGT723D iter 3210: loss 2.6649, time 3564.52ms, mfu 2.17%
+model:LGT723D iter 3220: loss 3.0810, time 3568.39ms, mfu 2.20%
+model:LGT723D iter 3230: loss 2.9685, time 2950.24ms, mfu 2.28%
+model:LGT723D iter 3240: loss 3.3592, time 2898.58ms, mfu 2.36%
+------average encoder activity 0.468
+-----------average decoder density 0.1850
+step 3250: train loss 2.9947, val loss 2.9705
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3250: loss 3.0040, time 50072.14ms, mfu 2.14%
+model:LGT723D iter 3260: loss 2.9844, time 3546.60ms, mfu 2.18%
+model:LGT723D iter 3270: loss 2.8610, time 3531.16ms, mfu 2.21%
+model:LGT723D iter 3280: loss 2.8040, time 2993.28ms, mfu 2.28%
+model:LGT723D iter 3290: loss 2.8285, time 3276.40ms, mfu 2.33%
+------average encoder activity 0.472
+-----------average decoder density 0.1917
+step 3300: train loss 2.9646, val loss 2.9566
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3300: loss 3.3527, time 49888.85ms, mfu 2.11%
+model:LGT723D iter 3310: loss 2.9946, time 3507.13ms, mfu 2.15%
+model:LGT723D iter 3320: loss 2.9172, time 3422.57ms, mfu 2.20%
+model:LGT723D iter 3330: loss 2.8687, time 3015.18ms, mfu 2.27%
+model:LGT723D iter 3340: loss 2.7021, time 3374.37ms, mfu 2.30%
+------average encoder activity 0.480
+-----------average decoder density 0.2415
+step 3350: train loss 2.9845, val loss 2.9595
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3350: loss 2.9581, time 49805.04ms, mfu 2.09%
+model:LGT723D iter 3360: loss 2.7227, time 3527.53ms, mfu 2.13%
+model:LGT723D iter 3370: loss 3.0464, time 3118.71ms, mfu 2.20%
+model:LGT723D iter 3380: loss 2.6104, time 3220.78ms, mfu 2.26%
+model:LGT723D iter 3390: loss 2.8513, time 3536.19ms, mfu 2.28%
+------average encoder activity 0.487
+-----------average decoder density 0.2051
+step 3400: train loss 2.9591, val loss 2.9534
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3400: loss 2.9344, time 50032.42ms, mfu 2.07%
+model:LGT723D iter 3410: loss 2.9212, time 3117.09ms, mfu 2.15%
+model:LGT723D iter 3420: loss 3.1085, time 2797.86ms, mfu 2.25%
+model:LGT723D iter 3430: loss 3.0025, time 3363.91ms, mfu 2.29%
+model:LGT723D iter 3440: loss 3.0777, time 3376.20ms, mfu 2.32%
+------average encoder activity 0.492
+-----------average decoder density 0.2283
+step 3450: train loss 2.9582, val loss 2.9402
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3450: loss 3.1129, time 50531.36ms, mfu 2.11%
+model:LGT723D iter 3460: loss 2.9758, time 3061.41ms, mfu 2.18%
+model:LGT723D iter 3470: loss 2.8953, time 3208.53ms, mfu 2.24%
+model:LGT723D iter 3480: loss 2.9116, time 3251.87ms, mfu 2.29%
+model:LGT723D iter 3490: loss 3.1089, time 3159.56ms, mfu 2.34%
+------average encoder activity 0.497
+-----------average decoder density 0.1913
+step 3500: train loss 2.9367, val loss 2.9299
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3500: loss 2.8097, time 49791.05ms, mfu 2.12%
+model:LGT723D iter 3510: loss 2.8428, time 3027.47ms, mfu 2.20%
+model:LGT723D iter 3520: loss 2.8284, time 3569.35ms, mfu 2.23%
+model:LGT723D iter 3530: loss 2.7996, time 3550.49ms, mfu 2.26%
+model:LGT723D iter 3540: loss 2.7780, time 3504.12ms, mfu 2.28%
+------average encoder activity 0.504
+-----------average decoder density 0.1974
+step 3550: train loss 2.9447, val loss 2.9407
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3550: loss 3.1682, time 50205.61ms, mfu 2.07%
+model:LGT723D iter 3560: loss 3.1002, time 3027.79ms, mfu 2.16%
+model:LGT723D iter 3570: loss 2.4130, time 3546.85ms, mfu 2.19%
+model:LGT723D iter 3580: loss 2.9789, time 3506.69ms, mfu 2.22%
+model:LGT723D iter 3590: loss 2.8051, time 3461.46ms, mfu 2.26%
+------average encoder activity 0.511
+-----------average decoder density 0.2230
+step 3600: train loss 2.9292, val loss 2.9477
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3600: loss 3.1877, time 49837.09ms, mfu 2.05%
+model:LGT723D iter 3610: loss 2.7512, time 3060.91ms, mfu 2.13%
+model:LGT723D iter 3620: loss 2.9217, time 3476.94ms, mfu 2.17%
+model:LGT723D iter 3630: loss 2.4479, time 3591.69ms, mfu 2.20%
+model:LGT723D iter 3640: loss 2.9522, time 3523.41ms, mfu 2.23%
+------average encoder activity 0.519
+-----------average decoder density 0.2358
+step 3650: train loss 2.9485, val loss 2.9341
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3650: loss 2.7943, time 49727.85ms, mfu 2.03%
+model:LGT723D iter 3660: loss 3.1560, time 2977.07ms, mfu 2.12%
+model:LGT723D iter 3670: loss 3.0286, time 3512.84ms, mfu 2.16%
+model:LGT723D iter 3680: loss 2.9894, time 3565.11ms, mfu 2.19%
+model:LGT723D iter 3690: loss 2.8343, time 3557.03ms, mfu 2.22%
+------average encoder activity 0.526
+-----------average decoder density 0.2672
+step 3700: train loss 2.9543, val loss 2.9485
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3700: loss 3.2438, time 49857.92ms, mfu 2.02%
+model:LGT723D iter 3710: loss 2.9616, time 2613.13ms, mfu 2.16%
+model:LGT723D iter 3720: loss 3.0466, time 3067.79ms, mfu 2.23%
+model:LGT723D iter 3730: loss 2.9487, time 3186.86ms, mfu 2.28%
+model:LGT723D iter 3740: loss 2.4734, time 3292.52ms, mfu 2.32%
+------average encoder activity 0.530
+-----------average decoder density 0.2080
+step 3750: train loss 2.9232, val loss 2.9519
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3750: loss 3.0950, time 50560.92ms, mfu 2.11%
+model:LGT723D iter 3760: loss 2.8991, time 2914.66ms, mfu 2.20%
+model:LGT723D iter 3770: loss 2.8576, time 3236.61ms, mfu 2.25%
+model:LGT723D iter 3780: loss 3.0279, time 3044.06ms, mfu 2.32%
+model:LGT723D iter 3790: loss 2.7809, time 3045.46ms, mfu 2.38%
+------average encoder activity 0.536
+-----------average decoder density 0.2457
+step 3800: train loss 2.9238, val loss 2.9043
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3800: loss 3.0176, time 49866.87ms, mfu 2.16%
+model:LGT723D iter 3810: loss 2.7178, time 3521.20ms, mfu 2.19%
+model:LGT723D iter 3820: loss 3.1233, time 3530.39ms, mfu 2.22%
+model:LGT723D iter 3830: loss 2.7790, time 3550.56ms, mfu 2.25%
+model:LGT723D iter 3840: loss 2.9349, time 2955.46ms, mfu 2.33%
+------average encoder activity 0.541
+-----------average decoder density 0.2384
+step 3850: train loss 2.9173, val loss 2.9289
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3850: loss 2.7848, time 50265.62ms, mfu 2.11%
+model:LGT723D iter 3860: loss 3.1742, time 3552.67ms, mfu 2.15%
+model:LGT723D iter 3870: loss 3.1295, time 3526.77ms, mfu 2.18%
+model:LGT723D iter 3880: loss 3.1227, time 3540.63ms, mfu 2.22%
+model:LGT723D iter 3890: loss 2.8517, time 2989.03ms, mfu 2.29%
+------average encoder activity 0.548
+-----------average decoder density 0.2452
+step 3900: train loss 2.9078, val loss 2.9166
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3900: loss 2.9654, time 50367.29ms, mfu 2.08%
+model:LGT723D iter 3910: loss 2.8986, time 3523.86ms, mfu 2.12%
+model:LGT723D iter 3920: loss 3.1483, time 3553.63ms, mfu 2.16%
+model:LGT723D iter 3930: loss 2.9430, time 3026.03ms, mfu 2.23%
+model:LGT723D iter 3940: loss 2.4492, time 3221.05ms, mfu 2.29%
+------average encoder activity 0.555
+-----------average decoder density 0.2050
+step 3950: train loss 2.9018, val loss 2.9321
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3950: loss 3.1543, time 49927.77ms, mfu 2.08%
+model:LGT723D iter 3960: loss 3.0066, time 3210.64ms, mfu 2.14%
+model:LGT723D iter 3970: loss 2.6690, time 3259.51ms, mfu 2.20%
+model:LGT723D iter 3980: loss 2.7738, time 3041.86ms, mfu 2.27%
+model:LGT723D iter 3990: loss 3.3059, time 3566.86ms, mfu 2.29%
+------average encoder activity 0.560
+-----------average decoder density 0.2208
+step 4000: train loss 2.9132, val loss 2.9356
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4000: loss 2.7930, time 49877.18ms, mfu 2.08%
+model:LGT723D iter 4010: loss 3.0139, time 3075.75ms, mfu 2.16%
+model:LGT723D iter 4020: loss 2.9482, time 2611.26ms, mfu 2.28%
+model:LGT723D iter 4030: loss 2.7875, time 2698.61ms, mfu 2.38%
+model:LGT723D iter 4040: loss 2.6278, time 2996.20ms, mfu 2.44%
+------average encoder activity 0.565
+-----------average decoder density 0.2575
+step 4050: train loss 2.9146, val loss 2.8832
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4050: loss 3.0836, time 50188.07ms, mfu 2.21%
+model:LGT723D iter 4060: loss 3.0293, time 3558.17ms, mfu 2.24%
+model:LGT723D iter 4070: loss 3.1234, time 2958.98ms, mfu 2.31%
+model:LGT723D iter 4080: loss 2.8600, time 3104.77ms, mfu 2.37%
+model:LGT723D iter 4090: loss 2.8377, time 3097.82ms, mfu 2.42%
+------average encoder activity 0.573
+-----------average decoder density 0.2432
+step 4100: train loss 2.8678, val loss 2.8872
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4100: loss 3.0401, time 49750.74ms, mfu 2.19%
+model:LGT723D iter 4110: loss 2.7776, time 3543.30ms, mfu 2.22%
+model:LGT723D iter 4120: loss 2.8191, time 3035.52ms, mfu 2.29%
+model:LGT723D iter 4130: loss 2.8122, time 3187.00ms, mfu 2.34%
+model:LGT723D iter 4140: loss 2.9534, time 3460.71ms, mfu 2.36%
+------average encoder activity 0.575
+-----------average decoder density 0.2433
+step 4150: train loss 2.8752, val loss 2.8755
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4150: loss 2.7450, time 50022.50ms, mfu 2.14%
+model:LGT723D iter 4160: loss 3.1428, time 3399.89ms, mfu 2.19%
+model:LGT723D iter 4170: loss 2.9860, time 3048.27ms, mfu 2.26%
+model:LGT723D iter 4180: loss 2.8109, time 3566.50ms, mfu 2.28%
+model:LGT723D iter 4190: loss 2.2741, time 3567.36ms, mfu 2.30%
+------average encoder activity 0.584
+-----------average decoder density 0.2256
+step 4200: train loss 2.8603, val loss 2.8759
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4200: loss 2.5907, time 50051.93ms, mfu 2.09%
+model:LGT723D iter 4210: loss 2.8377, time 2863.97ms, mfu 2.19%
+model:LGT723D iter 4220: loss 2.9857, time 2899.98ms, mfu 2.28%
+model:LGT723D iter 4230: loss 2.7140, time 3469.03ms, mfu 2.30%
+model:LGT723D iter 4240: loss 2.9420, time 3604.09ms, mfu 2.32%
+------average encoder activity 0.589
+-----------average decoder density 0.2336
+step 4250: train loss 2.8689, val loss 2.8754
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4250: loss 2.8928, time 50475.90ms, mfu 2.10%
+model:LGT723D iter 4260: loss 3.1517, time 2830.33ms, mfu 2.21%
+model:LGT723D iter 4270: loss 2.8581, time 2853.57ms, mfu 2.30%
+model:LGT723D iter 4280: loss 3.1282, time 3008.71ms, mfu 2.36%
+model:LGT723D iter 4290: loss 2.6491, time 3031.65ms, mfu 2.42%
+------average encoder activity 0.597
+-----------average decoder density 0.2512
+step 4300: train loss 2.8627, val loss 2.8805
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4300: loss 2.7603, time 49796.01ms, mfu 2.19%
+model:LGT723D iter 4310: loss 2.9809, time 3058.68ms, mfu 2.26%
+model:LGT723D iter 4320: loss 2.8247, time 3416.17ms, mfu 2.29%
+model:LGT723D iter 4330: loss 2.9047, time 3273.85ms, mfu 2.34%
+model:LGT723D iter 4340: loss 2.8630, time 3110.21ms, mfu 2.39%
+------average encoder activity 0.602
+-----------average decoder density 0.2543
+step 4350: train loss 2.8761, val loss 2.8817
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4350: loss 3.1381, time 49986.14ms, mfu 2.17%
+model:LGT723D iter 4360: loss 2.6114, time 3056.23ms, mfu 2.24%
+model:LGT723D iter 4370: loss 2.9938, time 3546.95ms, mfu 2.26%
+model:LGT723D iter 4380: loss 2.7195, time 3543.32ms, mfu 2.29%
+model:LGT723D iter 4390: loss 3.0683, time 3522.37ms, mfu 2.31%
+------average encoder activity 0.608
+-----------average decoder density 0.2498
+step 4400: train loss 2.8583, val loss 2.8772
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4400: loss 2.9863, time 49719.66ms, mfu 2.10%
+model:LGT723D iter 4410: loss 2.9516, time 3130.89ms, mfu 2.17%
+model:LGT723D iter 4420: loss 2.9887, time 3460.96ms, mfu 2.21%
+model:LGT723D iter 4430: loss 3.0131, time 3464.17ms, mfu 2.24%
+model:LGT723D iter 4440: loss 2.8357, time 3064.82ms, mfu 2.31%
+------average encoder activity 0.616
+-----------average decoder density 0.2341
+step 4450: train loss 2.8247, val loss 2.8570
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4450: loss 2.3850, time 50395.74ms, mfu 2.09%
+model:LGT723D iter 4460: loss 3.1676, time 3235.73ms, mfu 2.16%
+model:LGT723D iter 4470: loss 2.4950, time 3156.38ms, mfu 2.22%
+model:LGT723D iter 4480: loss 2.8078, time 2924.34ms, mfu 2.30%
+model:LGT723D iter 4490: loss 2.9552, time 2589.42ms, mfu 2.41%
+------average encoder activity 0.621
+-----------average decoder density 0.2304
+step 4500: train loss 2.8573, val loss 2.8666
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4500: loss 3.1455, time 50363.35ms, mfu 2.19%
+model:LGT723D iter 4510: loss 2.6911, time 3542.08ms, mfu 2.22%
+model:LGT723D iter 4520: loss 3.0970, time 3559.46ms, mfu 2.25%
+model:LGT723D iter 4530: loss 3.0294, time 3048.77ms, mfu 2.31%
+model:LGT723D iter 4540: loss 2.9496, time 3136.53ms, mfu 2.36%
+------average encoder activity 0.625
+-----------average decoder density 0.2643
+step 4550: train loss 2.8389, val loss 2.8435
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4550: loss 2.6631, time 50102.39ms, mfu 2.14%
+model:LGT723D iter 4560: loss 2.6829, time 3531.73ms, mfu 2.18%
+model:LGT723D iter 4570: loss 2.9333, time 3532.48ms, mfu 2.21%
+model:LGT723D iter 4580: loss 2.7817, time 3066.41ms, mfu 2.28%
+model:LGT723D iter 4590: loss 2.6693, time 3521.95ms, mfu 2.30%
+------average encoder activity 0.634
+-----------average decoder density 0.2565
+step 4600: train loss 2.8542, val loss 2.8859
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4600: loss 2.5477, time 50099.72ms, mfu 2.09%
+model:LGT723D iter 4610: loss 2.7593, time 3300.46ms, mfu 2.15%
+model:LGT723D iter 4620: loss 2.8944, time 3371.18ms, mfu 2.20%
+model:LGT723D iter 4630: loss 2.9384, time 3016.63ms, mfu 2.27%
+model:LGT723D iter 4640: loss 2.6730, time 3556.28ms, mfu 2.29%
+------average encoder activity 0.636
+-----------average decoder density 0.2688
+step 4650: train loss 2.8168, val loss 2.8529
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4650: loss 2.7560, time 49740.14ms, mfu 2.08%
+model:LGT723D iter 4660: loss 2.8969, time 2943.63ms, mfu 2.17%
+model:LGT723D iter 4670: loss 2.8778, time 3267.18ms, mfu 2.23%
+model:LGT723D iter 4680: loss 2.7829, time 3225.78ms, mfu 2.28%
+model:LGT723D iter 4690: loss 2.9702, time 3055.41ms, mfu 2.34%
+------average encoder activity 0.643
+-----------average decoder density 0.2827
+step 4700: train loss 2.8295, val loss 2.8311
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4700: loss 2.5860, time 50223.76ms, mfu 2.12%
+model:LGT723D iter 4710: loss 2.7586, time 3385.07ms, mfu 2.17%
+model:LGT723D iter 4720: loss 2.6347, time 3430.78ms, mfu 2.21%
+model:LGT723D iter 4730: loss 2.3142, time 3396.03ms, mfu 2.25%
+model:LGT723D iter 4740: loss 3.2170, time 3036.36ms, mfu 2.32%
+------average encoder activity 0.652
+-----------average decoder density 0.2672
+step 4750: train loss 2.8446, val loss 2.8343
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4750: loss 2.6948, time 49755.82ms, mfu 2.10%
+model:LGT723D iter 4760: loss 2.5216, time 3120.20ms, mfu 2.18%
+model:LGT723D iter 4770: loss 2.6307, time 3295.62ms, mfu 2.23%
+model:LGT723D iter 4780: loss 2.7667, time 3416.86ms, mfu 2.26%
+model:LGT723D iter 4790: loss 2.8422, time 3018.23ms, mfu 2.33%
+------average encoder activity 0.656
+-----------average decoder density 0.2524
+step 4800: train loss 2.8356, val loss 2.8220
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4800: loss 2.7628, time 49672.93ms, mfu 2.12%
+model:LGT723D iter 4810: loss 2.7516, time 3011.73ms, mfu 2.20%
+model:LGT723D iter 4820: loss 3.1412, time 3044.19ms, mfu 2.27%
+model:LGT723D iter 4830: loss 2.8124, time 3259.67ms, mfu 2.31%
+model:LGT723D iter 4840: loss 2.9046, time 2903.59ms, mfu 2.39%
+------average encoder activity 0.662
+-----------average decoder density 0.3056
+step 4850: train loss 2.7974, val loss 2.8463
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4850: loss 3.0736, time 50493.78ms, mfu 2.16%
+model:LGT723D iter 4860: loss 3.0059, time 3387.59ms, mfu 2.21%
+model:LGT723D iter 4870: loss 2.6094, time 3299.15ms, mfu 2.26%
+model:LGT723D iter 4880: loss 2.9906, time 3168.91ms, mfu 2.31%
+model:LGT723D iter 4890: loss 2.4177, time 2639.72ms, mfu 2.41%
+------average encoder activity 0.667
+-----------average decoder density 0.2876
+step 4900: train loss 2.7956, val loss 2.8178
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4900: loss 2.8695, time 50087.88ms, mfu 2.19%
+model:LGT723D iter 4910: loss 2.9095, time 3515.27ms, mfu 2.22%
+model:LGT723D iter 4920: loss 2.8028, time 3559.30ms, mfu 2.25%
+model:LGT723D iter 4930: loss 2.7717, time 3433.50ms, mfu 2.28%
+model:LGT723D iter 4940: loss 2.6432, time 2883.16ms, mfu 2.36%
+------average encoder activity 0.674
+-----------average decoder density 0.2993
+step 4950: train loss 2.8108, val loss 2.8369
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4950: loss 2.8587, time 50165.88ms, mfu 2.14%
+model:LGT723D iter 4960: loss 2.9697, time 3503.75ms, mfu 2.18%
+model:LGT723D iter 4970: loss 2.9257, time 3534.26ms, mfu 2.21%
+model:LGT723D iter 4980: loss 2.6721, time 3552.11ms, mfu 2.24%
+model:LGT723D iter 4990: loss 2.8556, time 3046.25ms, mfu 2.31%
+------average encoder activity 0.678
+-----------average decoder density 0.2798
+step 5000: train loss 2.7735, val loss 2.8328
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5000: loss 2.8876, time 49831.13ms, mfu 2.09%
+model:LGT723D iter 5010: loss 2.6570, time 3305.73ms, mfu 2.15%
+model:LGT723D iter 5020: loss 2.8051, time 3565.75ms, mfu 2.18%
+model:LGT723D iter 5030: loss 2.9309, time 3581.46ms, mfu 2.21%
+model:LGT723D iter 5040: loss 2.6832, time 3119.03ms, mfu 2.28%
+------average encoder activity 0.683
+-----------average decoder density 0.2692
+step 5050: train loss 2.8133, val loss 2.7989
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5050: loss 3.1178, time 49544.18ms, mfu 2.07%
+model:LGT723D iter 5060: loss 2.7618, time 3027.15ms, mfu 2.15%
+model:LGT723D iter 5070: loss 3.0106, time 3499.19ms, mfu 2.19%
+model:LGT723D iter 5080: loss 2.9464, time 3504.23ms, mfu 2.22%
+model:LGT723D iter 5090: loss 2.5586, time 3303.77ms, mfu 2.27%
+------average encoder activity 0.685
+-----------average decoder density 0.2971
+step 5100: train loss 2.8049, val loss 2.8253
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5100: loss 3.1086, time 49638.29ms, mfu 2.06%
+model:LGT723D iter 5110: loss 2.9933, time 3026.21ms, mfu 2.15%
+model:LGT723D iter 5120: loss 2.6754, time 3050.12ms, mfu 2.22%
+model:LGT723D iter 5130: loss 2.8146, time 3520.00ms, mfu 2.25%
+model:LGT723D iter 5140: loss 2.6730, time 3491.28ms, mfu 2.28%
+------average encoder activity 0.693
+-----------average decoder density 0.2793
+step 5150: train loss 2.7981, val loss 2.7859
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5150: loss 2.7018, time 49523.10ms, mfu 2.07%
+model:LGT723D iter 5160: loss 2.8834, time 3393.82ms, mfu 2.12%
+model:LGT723D iter 5170: loss 2.3768, time 3089.60ms, mfu 2.20%
+model:LGT723D iter 5180: loss 2.6615, time 2747.35ms, mfu 2.30%
+model:LGT723D iter 5190: loss 3.0310, time 3041.08ms, mfu 2.36%
+------average encoder activity 0.699
+-----------average decoder density 0.3206
+step 5200: train loss 2.7325, val loss 2.7981
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5200: loss 3.0264, time 49940.29ms, mfu 2.14%
+model:LGT723D iter 5210: loss 2.4919, time 3543.19ms, mfu 2.18%
+model:LGT723D iter 5220: loss 2.7182, time 3433.98ms, mfu 2.22%
+model:LGT723D iter 5230: loss 2.6258, time 3044.65ms, mfu 2.29%
+model:LGT723D iter 5240: loss 2.9816, time 3535.04ms, mfu 2.31%
+------average encoder activity 0.705
+-----------average decoder density 0.2723
+step 5250: train loss 2.7887, val loss 2.8178
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5250: loss 2.4871, time 50355.14ms, mfu 2.09%
+model:LGT723D iter 5260: loss 2.9577, time 3129.55ms, mfu 2.17%
+model:LGT723D iter 5270: loss 2.9586, time 3237.13ms, mfu 2.22%
+model:LGT723D iter 5280: loss 2.8369, time 2909.46ms, mfu 2.31%
+model:LGT723D iter 5290: loss 2.6257, time 3295.70ms, mfu 2.34%
+------average encoder activity 0.709
+-----------average decoder density 0.2725
+step 5300: train loss 2.7761, val loss 2.8013
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5300: loss 2.7563, time 50422.35ms, mfu 2.13%
+model:LGT723D iter 5310: loss 2.6524, time 3065.24ms, mfu 2.20%
+model:LGT723D iter 5320: loss 2.7948, time 2960.56ms, mfu 2.28%
+model:LGT723D iter 5330: loss 2.9208, time 2898.55ms, mfu 2.36%
+model:LGT723D iter 5340: loss 2.6966, time 2805.28ms, mfu 2.44%
+------average encoder activity 0.714
+-----------average decoder density 0.2973
+step 5350: train loss 2.7628, val loss 2.7912
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5350: loss 2.7662, time 50258.04ms, mfu 2.21%
+model:LGT723D iter 5360: loss 2.3940, time 3470.69ms, mfu 2.24%
+model:LGT723D iter 5370: loss 2.6420, time 3448.10ms, mfu 2.28%
+model:LGT723D iter 5380: loss 2.2733, time 3168.72ms, mfu 2.33%
+model:LGT723D iter 5390: loss 2.8158, time 2681.15ms, mfu 2.43%
+------average encoder activity 0.720
+-----------average decoder density 0.2896
+step 5400: train loss 2.7973, val loss 2.8135
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5400: loss 3.0435, time 50055.00ms, mfu 2.20%
+model:LGT723D iter 5410: loss 2.6449, time 3530.60ms, mfu 2.23%
+model:LGT723D iter 5420: loss 2.4274, time 3525.91ms, mfu 2.26%
+model:LGT723D iter 5430: loss 2.7585, time 3502.12ms, mfu 2.29%
+model:LGT723D iter 5440: loss 2.3220, time 2893.44ms, mfu 2.36%
+------average encoder activity 0.723
+-----------average decoder density 0.3582
+step 5450: train loss 2.7689, val loss 2.8010
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5450: loss 2.8738, time 50329.37ms, mfu 2.14%
+model:LGT723D iter 5460: loss 2.8823, time 3404.37ms, mfu 2.19%
+model:LGT723D iter 5470: loss 2.9025, time 3555.83ms, mfu 2.22%
+model:LGT723D iter 5480: loss 2.5732, time 3595.04ms, mfu 2.24%
+model:LGT723D iter 5490: loss 2.4465, time 3017.15ms, mfu 2.31%
+------average encoder activity 0.728
+-----------average decoder density 0.2967
+step 5500: train loss 2.7716, val loss 2.7837
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5500: loss 2.4613, time 49904.33ms, mfu 2.10%
+model:LGT723D iter 5510: loss 2.7959, time 3206.30ms, mfu 2.16%
+model:LGT723D iter 5520: loss 2.8328, time 3341.76ms, mfu 2.21%
+model:LGT723D iter 5530: loss 2.8498, time 3396.93ms, mfu 2.25%
+model:LGT723D iter 5540: loss 2.9633, time 3079.99ms, mfu 2.31%
+------average encoder activity 0.733
+-----------average decoder density 0.2768
+step 5550: train loss 2.7842, val loss 2.7679
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5550: loss 2.6832, time 49175.97ms, mfu 2.10%
+model:LGT723D iter 5560: loss 2.6013, time 2831.93ms, mfu 2.20%
+model:LGT723D iter 5570: loss 2.9972, time 3104.67ms, mfu 2.27%
+model:LGT723D iter 5580: loss 2.8843, time 3105.73ms, mfu 2.33%
+model:LGT723D iter 5590: loss 2.9508, time 2673.95ms, mfu 2.42%
+------average encoder activity 0.739
+-----------average decoder density 0.3077
+step 5600: train loss 2.7594, val loss 2.7887
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5600: loss 2.7427, time 50571.10ms, mfu 2.20%
+model:LGT723D iter 5610: loss 2.9722, time 3089.19ms, mfu 2.27%
+model:LGT723D iter 5620: loss 2.7980, time 2730.20ms, mfu 2.36%
+model:LGT723D iter 5630: loss 2.9957, time 3501.84ms, mfu 2.38%
+model:LGT723D iter 5640: loss 2.2418, time 3717.86ms, mfu 2.38%
+------average encoder activity 0.742
+-----------average decoder density 0.2828
+step 5650: train loss 2.7833, val loss 2.7894
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5650: loss 3.0421, time 51240.94ms, mfu 2.16%
+model:LGT723D iter 5660: loss 2.8892, time 3461.26ms, mfu 2.20%
+model:LGT723D iter 5670: loss 2.6940, time 3077.05ms, mfu 2.27%
+model:LGT723D iter 5680: loss 3.0649, time 2725.10ms, mfu 2.36%
+model:LGT723D iter 5690: loss 2.7590, time 3606.32ms, mfu 2.37%
+------average encoder activity 0.748
+-----------average decoder density 0.3378
+step 5700: train loss 2.7504, val loss 2.7746
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5700: loss 2.9506, time 51508.26ms, mfu 2.15%
+model:LGT723D iter 5710: loss 2.7222, time 3422.40ms, mfu 2.20%
+model:LGT723D iter 5720: loss 2.9150, time 3159.46ms, mfu 2.26%
+model:LGT723D iter 5730: loss 2.8108, time 2672.97ms, mfu 2.36%
+model:LGT723D iter 5740: loss 2.6655, time 3455.68ms, mfu 2.38%
+------average encoder activity 0.753
+-----------average decoder density 0.2922
+step 5750: train loss 2.7543, val loss 2.7805
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5750: loss 2.7150, time 51569.54ms, mfu 2.16%
+model:LGT723D iter 5760: loss 2.6512, time 3040.08ms, mfu 2.24%
+model:LGT723D iter 5770: loss 2.8513, time 3154.78ms, mfu 2.29%
+model:LGT723D iter 5780: loss 2.2899, time 3104.15ms, mfu 2.35%
+model:LGT723D iter 5790: loss 2.3059, time 2996.11ms, mfu 2.41%
+------average encoder activity 0.760
+-----------average decoder density 0.3468
+step 5800: train loss 2.7600, val loss 2.7461
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5800: loss 2.9962, time 51665.10ms, mfu 2.18%
+model:LGT723D iter 5810: loss 2.6040, time 3561.10ms, mfu 2.21%
+model:LGT723D iter 5820: loss 2.8269, time 2711.91ms, mfu 2.32%
+model:LGT723D iter 5830: loss 2.8124, time 3129.64ms, mfu 2.37%
+model:LGT723D iter 5840: loss 1.9895, time 3290.91ms, mfu 2.40%
+------average encoder activity 0.763
+-----------average decoder density 0.3177
+step 5850: train loss 2.7563, val loss 2.7640
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5850: loss 2.5051, time 51815.90ms, mfu 2.18%
+model:LGT723D iter 5860: loss 2.8990, time 3684.58ms, mfu 2.20%
+model:LGT723D iter 5870: loss 2.5460, time 2832.37ms, mfu 2.29%
+model:LGT723D iter 5880: loss 2.8215, time 3093.56ms, mfu 2.35%
+model:LGT723D iter 5890: loss 2.5368, time 3540.20ms, mfu 2.36%
+------average encoder activity 0.768
+-----------average decoder density 0.3192
+step 5900: train loss 2.7316, val loss 2.7663
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5900: loss 2.9275, time 51607.36ms, mfu 2.15%
+model:LGT723D iter 5910: loss 2.3066, time 3391.05ms, mfu 2.19%
+model:LGT723D iter 5920: loss 3.0136, time 2868.94ms, mfu 2.28%
+model:LGT723D iter 5930: loss 2.6745, time 3331.26ms, mfu 2.32%
+model:LGT723D iter 5940: loss 2.7197, time 3742.62ms, mfu 2.32%
+------average encoder activity 0.773
+-----------average decoder density 0.3065
+step 5950: train loss 2.7504, val loss 2.7497
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 5950: loss 2.3678, time 51159.85ms, mfu 2.11%
+model:LGT723D iter 5960: loss 2.7074, time 3272.71ms, mfu 2.17%
+model:LGT723D iter 5970: loss 2.8915, time 3087.47ms, mfu 2.24%
+model:LGT723D iter 5980: loss 2.7290, time 2971.50ms, mfu 2.31%
+model:LGT723D iter 5990: loss 2.6523, time 3727.22ms, mfu 2.32%
+------average encoder activity 0.777
+-----------average decoder density 0.3210
+step 6000: train loss 2.7453, val loss 2.7840
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6000: loss 2.6069, time 51154.29ms, mfu 2.10%
+model:LGT723D iter 6010: loss 2.8944, time 3365.24ms, mfu 2.16%
+model:LGT723D iter 6020: loss 2.6386, time 3091.46ms, mfu 2.23%
+model:LGT723D iter 6030: loss 2.7750, time 2778.38ms, mfu 2.32%
+model:LGT723D iter 6040: loss 2.9255, time 3617.38ms, mfu 2.33%
+------average encoder activity 0.782
+-----------average decoder density 0.3262
+step 6050: train loss 2.7358, val loss 2.7644
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6050: loss 2.7190, time 51683.76ms, mfu 2.12%
+model:LGT723D iter 6060: loss 2.9112, time 3064.47ms, mfu 2.19%
+model:LGT723D iter 6070: loss 2.8494, time 3313.14ms, mfu 2.24%
+model:LGT723D iter 6080: loss 2.6548, time 3128.89ms, mfu 2.30%
+model:LGT723D iter 6090: loss 2.7527, time 2642.47ms, mfu 2.41%
+------average encoder activity 0.787
+-----------average decoder density 0.2791
+step 6100: train loss 2.7346, val loss 2.7204
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6100: loss 2.7829, time 50867.65ms, mfu 2.18%
+model:LGT723D iter 6110: loss 2.9385, time 3168.01ms, mfu 2.24%
+model:LGT723D iter 6120: loss 2.9574, time 2983.64ms, mfu 2.32%
+model:LGT723D iter 6130: loss 2.7291, time 3714.33ms, mfu 2.32%
+model:LGT723D iter 6140: loss 3.0068, time 3708.02ms, mfu 2.33%
+------average encoder activity 0.790
+-----------average decoder density 0.3147
+step 6150: train loss 2.7437, val loss 2.7536
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6150: loss 2.6735, time 50983.30ms, mfu 2.11%
+model:LGT723D iter 6160: loss 2.6992, time 3217.76ms, mfu 2.18%
+model:LGT723D iter 6170: loss 2.4718, time 3141.04ms, mfu 2.24%
+model:LGT723D iter 6180: loss 2.9190, time 2688.68ms, mfu 2.35%
+model:LGT723D iter 6190: loss 2.6268, time 3487.97ms, mfu 2.36%
+------average encoder activity 0.798
+-----------average decoder density 0.3020
+step 6200: train loss 2.7180, val loss 2.7414
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6200: loss 2.6787, time 51454.21ms, mfu 2.14%
+model:LGT723D iter 6210: loss 2.4356, time 3211.01ms, mfu 2.21%
+model:LGT723D iter 6220: loss 2.8721, time 3650.27ms, mfu 2.23%
+model:LGT723D iter 6230: loss 2.7472, time 3518.42ms, mfu 2.26%
+model:LGT723D iter 6240: loss 2.5595, time 2788.57ms, mfu 2.35%
+------average encoder activity 0.803
+-----------average decoder density 0.3481
+step 6250: train loss 2.6847, val loss 2.7133
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6250: loss 2.9035, time 52092.82ms, mfu 2.13%
+model:LGT723D iter 6260: loss 3.1269, time 3078.98ms, mfu 2.20%
+model:LGT723D iter 6270: loss 2.6354, time 2762.16ms, mfu 2.30%
+model:LGT723D iter 6280: loss 2.8337, time 3263.25ms, mfu 2.34%
+model:LGT723D iter 6290: loss 2.6265, time 3441.29ms, mfu 2.37%
+------average encoder activity 0.807
+-----------average decoder density 0.2950
+step 6300: train loss 2.7139, val loss 2.7066
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6300: loss 2.2185, time 50970.29ms, mfu 2.15%
+model:LGT723D iter 6310: loss 2.9939, time 2909.84ms, mfu 2.24%
+model:LGT723D iter 6320: loss 2.8248, time 3358.28ms, mfu 2.28%
+model:LGT723D iter 6330: loss 2.6487, time 3500.69ms, mfu 2.30%
+model:LGT723D iter 6340: loss 2.7334, time 3617.01ms, mfu 2.32%
+------average encoder activity 0.811
+-----------average decoder density 0.3291
+step 6350: train loss 2.7027, val loss 2.7484
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6350: loss 2.2357, time 51106.28ms, mfu 2.10%
+model:LGT723D iter 6360: loss 2.5532, time 3721.88ms, mfu 2.13%
+model:LGT723D iter 6370: loss 2.5884, time 3487.33ms, mfu 2.17%
+model:LGT723D iter 6380: loss 2.7179, time 2681.96ms, mfu 2.28%
+model:LGT723D iter 6390: loss 2.9461, time 3071.75ms, mfu 2.34%
+------average encoder activity 0.815
+-----------average decoder density 0.3239
+step 6400: train loss 2.7288, val loss 2.7272
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6400: loss 2.5803, time 50974.86ms, mfu 2.13%
+model:LGT723D iter 6410: loss 2.6271, time 2841.54ms, mfu 2.22%
+model:LGT723D iter 6420: loss 2.8144, time 2596.44ms, mfu 2.34%
+model:LGT723D iter 6430: loss 2.6029, time 3118.00ms, mfu 2.39%
+model:LGT723D iter 6440: loss 2.7108, time 3381.74ms, mfu 2.41%
+------average encoder activity 0.820
+-----------average decoder density 0.3902
+step 6450: train loss 2.7372, val loss 2.7546
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6450: loss 2.6113, time 50685.83ms, mfu 2.19%
+model:LGT723D iter 6460: loss 2.5236, time 2642.44ms, mfu 2.31%
+model:LGT723D iter 6470: loss 2.9681, time 2988.84ms, mfu 2.37%
+model:LGT723D iter 6480: loss 2.8164, time 3050.07ms, mfu 2.42%
+model:LGT723D iter 6490: loss 2.3578, time 2993.92ms, mfu 2.48%
+------average encoder activity 0.826
+-----------average decoder density 0.3237
+step 6500: train loss 2.7113, val loss 2.7262
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6500: loss 2.7338, time 50167.55ms, mfu 2.25%
+model:LGT723D iter 6510: loss 2.6144, time 3067.41ms, mfu 2.31%
+model:LGT723D iter 6520: loss 2.8671, time 3057.57ms, mfu 2.37%
+model:LGT723D iter 6530: loss 2.8240, time 3404.14ms, mfu 2.39%
+model:LGT723D iter 6540: loss 2.4982, time 3477.63ms, mfu 2.41%
+------average encoder activity 0.829
+-----------average decoder density 0.3449
+step 6550: train loss 2.6969, val loss 2.6905
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6550: loss 2.7091, time 51127.63ms, mfu 2.18%
+model:LGT723D iter 6560: loss 2.4224, time 2708.41ms, mfu 2.29%
+model:LGT723D iter 6570: loss 2.9158, time 2992.48ms, mfu 2.36%
+model:LGT723D iter 6580: loss 2.6190, time 3424.58ms, mfu 2.38%
+model:LGT723D iter 6590: loss 2.9283, time 3681.70ms, mfu 2.38%
+------average encoder activity 0.836
+-----------average decoder density 0.3222
+step 6600: train loss 2.6966, val loss 2.7413
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6600: loss 2.7792, time 50694.20ms, mfu 2.16%
+model:LGT723D iter 6610: loss 2.9178, time 3502.61ms, mfu 2.20%
+model:LGT723D iter 6620: loss 2.6901, time 3338.84ms, mfu 2.24%
+model:LGT723D iter 6630: loss 2.5762, time 2817.85ms, mfu 2.33%
+model:LGT723D iter 6640: loss 2.5549, time 2836.21ms, mfu 2.41%
+------average encoder activity 0.842
+-----------average decoder density 0.3100
+step 6650: train loss 2.6869, val loss 2.7232
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6650: loss 2.3267, time 50567.99ms, mfu 2.19%
+model:LGT723D iter 6660: loss 2.7132, time 2950.36ms, mfu 2.27%
+model:LGT723D iter 6670: loss 2.4033, time 2655.49ms, mfu 2.37%
+model:LGT723D iter 6680: loss 2.4787, time 3098.00ms, mfu 2.42%
+model:LGT723D iter 6690: loss 2.8684, time 3274.72ms, mfu 2.45%
+------average encoder activity 0.845
+-----------average decoder density 0.3412
+step 6700: train loss 2.6641, val loss 2.7257
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6700: loss 2.9377, time 50795.34ms, mfu 2.22%
+model:LGT723D iter 6710: loss 2.6904, time 3517.62ms, mfu 2.25%
+model:LGT723D iter 6720: loss 2.5537, time 3669.87ms, mfu 2.27%
+model:LGT723D iter 6730: loss 2.4506, time 3046.16ms, mfu 2.33%
+model:LGT723D iter 6740: loss 2.5585, time 3674.95ms, mfu 2.34%
+------average encoder activity 0.851
+-----------average decoder density 0.4113
+step 6750: train loss 2.6697, val loss 2.7117
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6750: loss 2.9443, time 50986.50ms, mfu 2.12%
+model:LGT723D iter 6760: loss 2.6993, time 3130.77ms, mfu 2.19%
+model:LGT723D iter 6770: loss 2.8128, time 3539.20ms, mfu 2.22%
+model:LGT723D iter 6780: loss 3.0228, time 3368.52ms, mfu 2.26%
+model:LGT723D iter 6790: loss 2.6019, time 2628.04ms, mfu 2.37%
+------average encoder activity 0.853
+-----------average decoder density 0.3365
+step 6800: train loss 2.6720, val loss 2.6976
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6800: loss 2.7284, time 50359.82ms, mfu 2.15%
+model:LGT723D iter 6810: loss 2.6642, time 3286.28ms, mfu 2.21%
+model:LGT723D iter 6820: loss 2.5519, time 2622.13ms, mfu 2.32%
+model:LGT723D iter 6830: loss 2.7200, time 3079.85ms, mfu 2.38%
+model:LGT723D iter 6840: loss 2.7542, time 3139.63ms, mfu 2.42%
+------average encoder activity 0.855
+-----------average decoder density 0.2976
+step 6850: train loss 2.7431, val loss 2.7325
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6850: loss 2.8078, time 50168.32ms, mfu 2.20%
+model:LGT723D iter 6860: loss 2.4291, time 3064.42ms, mfu 2.27%
+model:LGT723D iter 6870: loss 2.6680, time 3183.79ms, mfu 2.32%
+model:LGT723D iter 6880: loss 2.6344, time 2944.10ms, mfu 2.39%
+model:LGT723D iter 6890: loss 2.7293, time 3624.69ms, mfu 2.39%
+------average encoder activity 0.861
+-----------average decoder density 0.3280
+step 6900: train loss 2.8083, val loss 2.7062
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6900: loss 2.6616, time 51297.45ms, mfu 2.17%
+model:LGT723D iter 6910: loss 2.8528, time 3253.86ms, mfu 2.22%
+model:LGT723D iter 6920: loss 2.5983, time 3547.93ms, mfu 2.25%
+model:LGT723D iter 6930: loss 2.8873, time 3527.47ms, mfu 2.28%
+model:LGT723D iter 6940: loss 2.5828, time 3001.23ms, mfu 2.34%
+------average encoder activity 0.864
+-----------average decoder density 0.3796
+step 6950: train loss 2.7939, val loss 2.7126
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 6950: loss 3.0010, time 51060.63ms, mfu 2.13%
+model:LGT723D iter 6960: loss 2.7155, time 3384.98ms, mfu 2.18%
+model:LGT723D iter 6970: loss 2.4709, time 2869.28ms, mfu 2.27%
+model:LGT723D iter 6980: loss 2.9823, time 2842.53ms, mfu 2.35%
+model:LGT723D iter 6990: loss 2.7709, time 3087.31ms, mfu 2.40%
+------average encoder activity 0.870
+-----------average decoder density 0.3600
+step 7000: train loss 2.8219, val loss 2.7181
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7000: loss 2.4363, time 50546.65ms, mfu 2.18%
+model:LGT723D iter 7010: loss 2.5259, time 2736.32ms, mfu 2.28%
+model:LGT723D iter 7020: loss 2.7707, time 3064.23ms, mfu 2.35%
+model:LGT723D iter 7030: loss 2.7080, time 3147.00ms, mfu 2.39%
+model:LGT723D iter 7040: loss 2.5602, time 2915.23ms, mfu 2.46%
+------average encoder activity 0.874
+-----------average decoder density 0.3475
+step 7050: train loss 3.0324, val loss 2.7793
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7050: loss 2.8640, time 50903.46ms, mfu 2.23%
+model:LGT723D iter 7060: loss 2.8403, time 3454.08ms, mfu 2.26%
+model:LGT723D iter 7070: loss 2.3806, time 3143.30ms, mfu 2.32%
+model:LGT723D iter 7080: loss 2.7458, time 3682.40ms, mfu 2.32%
+model:LGT723D iter 7090: loss 2.8171, time 3709.91ms, mfu 2.33%
+------average encoder activity 0.879
+-----------average decoder density 0.3294
+step 7100: train loss 2.9149, val loss 2.7497
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7100: loss 2.3696, time 50807.41ms, mfu 2.12%
+model:LGT723D iter 7110: loss 2.3657, time 3482.93ms, mfu 2.16%
+model:LGT723D iter 7120: loss 2.6476, time 3111.60ms, mfu 2.23%
+model:LGT723D iter 7130: loss 2.6704, time 2567.68ms, mfu 2.35%
+model:LGT723D iter 7140: loss 2.4948, time 3369.88ms, mfu 2.38%
+------average encoder activity 0.882
+-----------average decoder density 0.3314
+step 7150: train loss 2.7350, val loss 2.7316
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7150: loss 2.7138, time 51843.86ms, mfu 2.16%
+model:LGT723D iter 7160: loss 2.2551, time 3317.23ms, mfu 2.21%
+model:LGT723D iter 7170: loss 2.0959, time 3519.43ms, mfu 2.24%
+model:LGT723D iter 7180: loss 2.4176, time 3089.16ms, mfu 2.30%
+model:LGT723D iter 7190: loss 2.4481, time 2716.58ms, mfu 2.40%
+------average encoder activity 0.888
+-----------average decoder density 0.3789
+step 7200: train loss 2.8519, val loss 2.7351
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7200: loss 2.5807, time 50754.32ms, mfu 2.17%
+model:LGT723D iter 7210: loss 2.6037, time 2970.46ms, mfu 2.25%
+model:LGT723D iter 7220: loss 2.7946, time 2936.33ms, mfu 2.33%
+model:LGT723D iter 7230: loss 2.3044, time 3700.51ms, mfu 2.34%
+model:LGT723D iter 7240: loss 2.6799, time 3475.39ms, mfu 2.36%
+------average encoder activity 0.893
+-----------average decoder density 0.3215
+step 7250: train loss 2.6870, val loss 2.6813
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7250: loss 2.7426, time 51336.06ms, mfu 2.14%
+model:LGT723D iter 7260: loss 2.6471, time 3523.62ms, mfu 2.18%
+model:LGT723D iter 7270: loss 2.5789, time 2670.25ms, mfu 2.29%
+model:LGT723D iter 7280: loss 2.5784, time 3084.62ms, mfu 2.35%
+model:LGT723D iter 7290: loss 2.6967, time 3300.00ms, mfu 2.38%
+------average encoder activity 0.898
+-----------average decoder density 0.3427
+step 7300: train loss 2.7007, val loss 2.7041
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7300: loss 2.6381, time 51503.49ms, mfu 2.16%
+model:LGT723D iter 7310: loss 2.8065, time 3705.46ms, mfu 2.18%
+model:LGT723D iter 7320: loss 2.5200, time 3519.25ms, mfu 2.22%
+model:LGT723D iter 7330: loss 3.1533, time 2841.55ms, mfu 2.30%
+model:LGT723D iter 7340: loss 2.9500, time 3317.57ms, mfu 2.34%
+------average encoder activity 0.901
+-----------average decoder density 0.4206
+step 7350: train loss 2.6609, val loss 2.7001
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7350: loss 2.5724, time 50795.89ms, mfu 2.12%
+model:LGT723D iter 7360: loss 2.5829, time 2616.26ms, mfu 2.25%
+model:LGT723D iter 7370: loss 2.2735, time 3219.42ms, mfu 2.30%
+model:LGT723D iter 7380: loss 2.2588, time 3535.23ms, mfu 2.32%
+model:LGT723D iter 7390: loss 2.3247, time 3176.18ms, mfu 2.37%
+------average encoder activity 0.905
+-----------average decoder density 0.3879
+step 7400: train loss 2.6658, val loss 2.6806
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7400: loss 2.7066, time 51701.79ms, mfu 2.15%
+model:LGT723D iter 7410: loss 3.0312, time 3504.06ms, mfu 2.18%
+model:LGT723D iter 7420: loss 2.5764, time 2653.62ms, mfu 2.30%
+model:LGT723D iter 7430: loss 2.7750, time 3100.46ms, mfu 2.35%
+model:LGT723D iter 7440: loss 2.3683, time 3332.99ms, mfu 2.38%
+------average encoder activity 0.913
+-----------average decoder density 0.3691
+step 7450: train loss 2.6961, val loss 2.6613
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7450: loss 2.5424, time 51475.45ms, mfu 2.16%
+model:LGT723D iter 7460: loss 2.5308, time 3725.41ms, mfu 2.18%
+model:LGT723D iter 7470: loss 2.7259, time 3568.82ms, mfu 2.21%
+model:LGT723D iter 7480: loss 2.9262, time 2832.19ms, mfu 2.30%
+model:LGT723D iter 7490: loss 2.5980, time 3092.98ms, mfu 2.36%
+------average encoder activity 0.919
+-----------average decoder density 0.3397
+step 7500: train loss 2.6585, val loss 2.6769
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7500: loss 2.6027, time 51609.35ms, mfu 2.14%
+model:LGT723D iter 7510: loss 2.4650, time 3199.28ms, mfu 2.20%
+model:LGT723D iter 7520: loss 2.6991, time 3694.49ms, mfu 2.22%
+model:LGT723D iter 7530: loss 2.5289, time 3373.82ms, mfu 2.26%
+model:LGT723D iter 7540: loss 2.7323, time 2713.65ms, mfu 2.36%
+------average encoder activity 0.923
+-----------average decoder density 0.3483
+step 7550: train loss 2.6430, val loss 2.6814
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7550: loss 2.5465, time 50986.87ms, mfu 2.14%
+model:LGT723D iter 7560: loss 2.6179, time 2928.62ms, mfu 2.23%
+model:LGT723D iter 7570: loss 2.5511, time 3039.82ms, mfu 2.30%
+model:LGT723D iter 7580: loss 2.2779, time 3743.69ms, mfu 2.31%
+model:LGT723D iter 7590: loss 2.3735, time 3488.62ms, mfu 2.33%
+------average encoder activity 0.927
+-----------average decoder density 0.3136
+step 7600: train loss 2.6371, val loss 2.6688
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7600: loss 2.6290, time 51195.30ms, mfu 2.11%
+model:LGT723D iter 7610: loss 2.5624, time 3506.49ms, mfu 2.15%
+model:LGT723D iter 7620: loss 2.8117, time 2870.95ms, mfu 2.25%
+model:LGT723D iter 7630: loss 2.7704, time 2864.31ms, mfu 2.33%
+model:LGT723D iter 7640: loss 2.6288, time 3329.56ms, mfu 2.36%
+------average encoder activity 0.928
+-----------average decoder density 0.4073
+step 7650: train loss 2.6865, val loss 2.6504
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7650: loss 2.5917, time 51443.74ms, mfu 2.14%
+model:LGT723D iter 7660: loss 2.4366, time 3618.33ms, mfu 2.17%
+model:LGT723D iter 7670: loss 2.2347, time 3388.78ms, mfu 2.22%
+model:LGT723D iter 7680: loss 2.6974, time 2629.23ms, mfu 2.33%
+model:LGT723D iter 7690: loss 2.7610, time 3146.26ms, mfu 2.38%
+------average encoder activity 0.930
+-----------average decoder density 0.3572
+step 7700: train loss 2.6228, val loss 2.6448
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7700: loss 2.6545, time 51912.82ms, mfu 2.16%
+model:LGT723D iter 7710: loss 2.3656, time 3145.65ms, mfu 2.22%
+model:LGT723D iter 7720: loss 2.7854, time 3461.09ms, mfu 2.26%
+model:LGT723D iter 7730: loss 2.5877, time 3078.26ms, mfu 2.32%
+model:LGT723D iter 7740: loss 2.4718, time 2665.32ms, mfu 2.42%
+------average encoder activity 0.936
+-----------average decoder density 0.3424
+step 7750: train loss 2.6150, val loss 2.6569
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7750: loss 2.6714, time 51748.95ms, mfu 2.19%
+model:LGT723D iter 7760: loss 2.7850, time 3712.69ms, mfu 2.21%
+model:LGT723D iter 7770: loss 2.8085, time 3072.05ms, mfu 2.28%
+model:LGT723D iter 7780: loss 2.6946, time 3270.30ms, mfu 2.32%
+model:LGT723D iter 7790: loss 2.7603, time 3102.39ms, mfu 2.38%
+------average encoder activity 0.940
+-----------average decoder density 0.3687
+step 7800: train loss 2.7736, val loss 2.6994
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7800: loss 2.7758, time 50407.68ms, mfu 2.16%
+model:LGT723D iter 7810: loss 1.9449, time 3109.71ms, mfu 2.22%
+model:LGT723D iter 7820: loss 2.4839, time 3423.62ms, mfu 2.26%
+model:LGT723D iter 7830: loss 2.7381, time 3174.47ms, mfu 2.31%
+model:LGT723D iter 7840: loss 2.8104, time 3716.72ms, mfu 2.32%
+------average encoder activity 0.942
+-----------average decoder density 0.3508
+step 7850: train loss 2.6802, val loss 2.6277
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7850: loss 2.8482, time 51179.80ms, mfu 2.10%
+model:LGT723D iter 7860: loss 2.3615, time 3008.99ms, mfu 2.19%
+model:LGT723D iter 7870: loss 2.5847, time 3184.44ms, mfu 2.25%
+model:LGT723D iter 7880: loss 2.3689, time 3105.49ms, mfu 2.31%
+model:LGT723D iter 7890: loss 2.8403, time 2785.55ms, mfu 2.39%
+------average encoder activity 0.948
+-----------average decoder density 0.3768
+step 7900: train loss 2.8032, val loss 2.7088
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7900: loss 2.4950, time 51760.31ms, mfu 2.17%
+model:LGT723D iter 7910: loss 2.6598, time 3763.63ms, mfu 2.19%
+model:LGT723D iter 7920: loss 2.4816, time 3018.23ms, mfu 2.26%
+model:LGT723D iter 7930: loss 2.5971, time 3194.22ms, mfu 2.31%
+model:LGT723D iter 7940: loss 2.5264, time 3084.97ms, mfu 2.37%
+------average encoder activity 0.950
+-----------average decoder density 0.3179
+step 7950: train loss 2.8823, val loss 2.6755
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 7950: loss 2.9383, time 51060.81ms, mfu 2.15%
+model:LGT723D iter 7960: loss 2.5821, time 3592.73ms, mfu 2.18%
+model:LGT723D iter 7970: loss 2.4389, time 3620.81ms, mfu 2.21%
+model:LGT723D iter 7980: loss 2.6690, time 3185.33ms, mfu 2.26%
+model:LGT723D iter 7990: loss 2.4509, time 3152.59ms, mfu 2.32%
+------average encoder activity 0.954
+-----------average decoder density 0.3520
+step 8000: train loss 2.9869, val loss 2.7845
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8000: loss 2.9246, time 50584.39ms, mfu 2.10%
+model:LGT723D iter 8010: loss 2.4059, time 2759.31ms, mfu 2.21%
+model:LGT723D iter 8020: loss 2.4546, time 3320.61ms, mfu 2.26%
+model:LGT723D iter 8030: loss 2.8881, time 3378.04ms, mfu 2.29%
+model:LGT723D iter 8040: loss 2.3752, time 3400.84ms, mfu 2.33%
+------average encoder activity 0.958
+-----------average decoder density 0.3644
+step 8050: train loss 2.6256, val loss 2.6410
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8050: loss 2.5220, time 49310.28ms, mfu 2.11%
+model:LGT723D iter 8060: loss 2.6267, time 2680.07ms, mfu 2.23%
+model:LGT723D iter 8070: loss 2.3233, time 2769.78ms, mfu 2.33%
+model:LGT723D iter 8080: loss 2.4626, time 3129.15ms, mfu 2.38%
+model:LGT723D iter 8090: loss 2.7071, time 3032.70ms, mfu 2.43%
+------average encoder activity 0.962
+-----------average decoder density 0.3721
+step 8100: train loss 2.7535, val loss 2.6641
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8100: loss 2.7764, time 49201.73ms, mfu 2.21%
+model:LGT723D iter 8110: loss 2.4044, time 2900.11ms, mfu 2.29%
+model:LGT723D iter 8120: loss 2.3593, time 2808.98ms, mfu 2.38%
+model:LGT723D iter 8130: loss 2.5231, time 2730.56ms, mfu 2.46%
+model:LGT723D iter 8140: loss 2.4445, time 3335.54ms, mfu 2.48%
+------average encoder activity 0.965
+-----------average decoder density 0.4143
+step 8150: train loss 2.8185, val loss 2.7147
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8150: loss 2.8733, time 49410.73ms, mfu 2.25%
+model:LGT723D iter 8160: loss 2.5461, time 2578.87ms, mfu 2.37%
+model:LGT723D iter 8170: loss 2.4210, time 2899.77ms, mfu 2.44%
+model:LGT723D iter 8180: loss 2.3541, time 2920.74ms, mfu 2.50%
+model:LGT723D iter 8190: loss 2.6429, time 2798.36ms, mfu 2.56%
+------average encoder activity 0.971
+-----------average decoder density 0.4113
+step 8200: train loss 2.9822, val loss 2.7293
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8200: loss 2.5023, time 49337.73ms, mfu 2.32%
+model:LGT723D iter 8210: loss 2.0611, time 2918.68ms, mfu 2.39%
+model:LGT723D iter 8220: loss 2.6741, time 2558.28ms, mfu 2.50%
+model:LGT723D iter 8230: loss 2.5296, time 2905.87ms, mfu 2.56%
+model:LGT723D iter 8240: loss 2.7339, time 2838.42ms, mfu 2.61%
+------average encoder activity 0.972
+-----------average decoder density 0.3412
+step 8250: train loss 2.8169, val loss 2.7146
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8250: loss 2.4808, time 49406.35ms, mfu 2.37%
+model:LGT723D iter 8260: loss 2.4317, time 2759.48ms, mfu 2.45%
+model:LGT723D iter 8270: loss 2.3563, time 2946.72ms, mfu 2.51%
+model:LGT723D iter 8280: loss 2.2280, time 2808.13ms, mfu 2.57%
+model:LGT723D iter 8290: loss 2.6016, time 2652.07ms, mfu 2.65%
+------average encoder activity 0.975
+-----------average decoder density 0.3939
+step 8300: train loss 2.6492, val loss 2.6750
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8300: loss 2.3129, time 49208.89ms, mfu 2.40%
+model:LGT723D iter 8310: loss 2.5445, time 3147.18ms, mfu 2.44%
+model:LGT723D iter 8320: loss 2.6109, time 2931.66ms, mfu 2.50%
+model:LGT723D iter 8330: loss 2.5827, time 3159.59ms, mfu 2.53%
+model:LGT723D iter 8340: loss 2.5330, time 2673.80ms, mfu 2.61%
+------average encoder activity 0.981
+-----------average decoder density 0.3631
+step 8350: train loss 2.7511, val loss 2.6609
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8350: loss 2.5801, time 48558.92ms, mfu 2.36%
+model:LGT723D iter 8360: loss 2.4896, time 3304.83ms, mfu 2.40%
+model:LGT723D iter 8370: loss 2.5747, time 3020.59ms, mfu 2.45%
+model:LGT723D iter 8380: loss 2.6967, time 3194.17ms, mfu 2.48%
+model:LGT723D iter 8390: loss 2.3208, time 3283.86ms, mfu 2.50%
+------average encoder activity 0.983
+-----------average decoder density 0.3841
+step 8400: train loss 2.7336, val loss 2.6605
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8400: loss 2.4367, time 48065.22ms, mfu 2.27%
+model:LGT723D iter 8410: loss 2.3870, time 2991.43ms, mfu 2.34%
+model:LGT723D iter 8420: loss 2.0319, time 3260.01ms, mfu 2.38%
+model:LGT723D iter 8430: loss 2.6034, time 3023.28ms, mfu 2.43%
+model:LGT723D iter 8440: loss 2.5171, time 3066.69ms, mfu 2.48%
+------average encoder activity 0.985
+-----------average decoder density 0.3748
+step 8450: train loss 2.6480, val loss 2.6178
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8450: loss 2.1666, time 48564.99ms, mfu 2.25%
+model:LGT723D iter 8460: loss 2.9577, time 3138.24ms, mfu 2.30%
+model:LGT723D iter 8470: loss 2.8662, time 3070.01ms, mfu 2.36%
+model:LGT723D iter 8480: loss 2.5134, time 3324.47ms, mfu 2.39%
+model:LGT723D iter 8490: loss 2.6354, time 2989.09ms, mfu 2.45%
+------average encoder activity 0.990
+-----------average decoder density 0.3871
+step 8500: train loss 2.9037, val loss 2.7176
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8500: loss 2.8270, time 48229.67ms, mfu 2.22%
+model:LGT723D iter 8510: loss 2.6791, time 3342.14ms, mfu 2.26%
+model:LGT723D iter 8520: loss 2.7089, time 3125.94ms, mfu 2.32%
+model:LGT723D iter 8530: loss 2.5585, time 3052.38ms, mfu 2.38%
+model:LGT723D iter 8540: loss 2.2903, time 3334.14ms, mfu 2.41%
+------average encoder activity 0.992
+-----------average decoder density 0.3163
+step 8550: train loss 2.9179, val loss 2.7417
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8550: loss 2.5152, time 49050.10ms, mfu 2.18%
+model:LGT723D iter 8560: loss 2.4865, time 3103.39ms, mfu 2.25%
+model:LGT723D iter 8570: loss 2.7581, time 2872.60ms, mfu 2.33%
+model:LGT723D iter 8580: loss 2.3718, time 3236.24ms, mfu 2.37%
+model:LGT723D iter 8590: loss 2.3388, time 3396.72ms, mfu 2.40%
+------average encoder activity 0.995
+-----------average decoder density 0.3823
+step 8600: train loss 2.9980, val loss 2.7704
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8600: loss 2.6830, time 48785.40ms, mfu 2.17%
+model:LGT723D iter 8610: loss 2.3300, time 3130.58ms, mfu 2.24%
+model:LGT723D iter 8620: loss 2.3454, time 2895.91ms, mfu 2.32%
+model:LGT723D iter 8630: loss 2.4979, time 3261.45ms, mfu 2.36%
+model:LGT723D iter 8640: loss 2.3687, time 3142.33ms, mfu 2.41%
+------average encoder activity 0.998
+-----------average decoder density 0.3332
+step 8650: train loss 2.7857, val loss 2.6488
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8650: loss 3.0053, time 48895.89ms, mfu 2.18%
+model:LGT723D iter 8660: loss 2.6598, time 3197.15ms, mfu 2.24%
+model:LGT723D iter 8670: loss 2.2549, time 2775.54ms, mfu 2.34%
+model:LGT723D iter 8680: loss 2.8041, time 2909.11ms, mfu 2.41%
+model:LGT723D iter 8690: loss 2.4289, time 2942.15ms, mfu 2.47%
+------average encoder activity 1.001
+-----------average decoder density 0.3565
+step 8700: train loss 3.0301, val loss 2.9228
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8700: loss 2.5596, time 49279.80ms, mfu 2.24%
+model:LGT723D iter 8710: loss 2.4407, time 2714.35ms, mfu 2.34%
+model:LGT723D iter 8720: loss 2.3602, time 2647.60ms, mfu 2.44%
+model:LGT723D iter 8730: loss 2.6371, time 2880.85ms, mfu 2.50%
+model:LGT723D iter 8740: loss 2.4535, time 3341.77ms, mfu 2.52%
+------average encoder activity 1.006
+-----------average decoder density 0.3998
+step 8750: train loss 2.7189, val loss 2.6810
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8750: loss 2.5622, time 49266.05ms, mfu 2.28%
+model:LGT723D iter 8760: loss 2.7508, time 2701.08ms, mfu 2.38%
+model:LGT723D iter 8770: loss 2.2736, time 2961.31ms, mfu 2.44%
+model:LGT723D iter 8780: loss 2.5121, time 3324.77ms, mfu 2.46%
+model:LGT723D iter 8790: loss 2.5040, time 3360.73ms, mfu 2.48%
+------average encoder activity 1.011
+-----------average decoder density 0.3767
+step 8800: train loss 2.7243, val loss 2.6204
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8800: loss 2.2635, time 49119.41ms, mfu 2.25%
+model:LGT723D iter 8810: loss 2.4505, time 3110.84ms, mfu 2.31%
+model:LGT723D iter 8820: loss 2.6835, time 2887.76ms, mfu 2.39%
+model:LGT723D iter 8830: loss 2.4776, time 3170.77ms, mfu 2.43%
+model:LGT723D iter 8840: loss 2.7402, time 3358.31ms, mfu 2.45%
+------average encoder activity 1.014
+-----------average decoder density 0.3779
+step 8850: train loss 3.1474, val loss 2.8531
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8850: loss 2.4526, time 48533.81ms, mfu 2.22%
+model:LGT723D iter 8860: loss 2.5576, time 3032.57ms, mfu 2.29%
+model:LGT723D iter 8870: loss 2.6813, time 3012.09ms, mfu 2.35%
+model:LGT723D iter 8880: loss 2.8263, time 3320.53ms, mfu 2.39%
+model:LGT723D iter 8890: loss 2.5660, time 3168.62ms, mfu 2.43%
+------average encoder activity 1.019
+-----------average decoder density 0.3880
+step 8900: train loss 2.9533, val loss 2.7647
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8900: loss 2.6566, time 48744.45ms, mfu 2.20%
+model:LGT723D iter 8910: loss 2.6787, time 2885.99ms, mfu 2.29%
+model:LGT723D iter 8920: loss 2.6489, time 3245.01ms, mfu 2.33%
+model:LGT723D iter 8930: loss 2.4925, time 3328.14ms, mfu 2.36%
+model:LGT723D iter 8940: loss 2.7460, time 2989.88ms, mfu 2.42%
+------average encoder activity 1.020
+-----------average decoder density 0.3733
+step 8950: train loss 2.8988, val loss 2.7347
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 8950: loss 2.5033, time 48367.25ms, mfu 2.20%
+model:LGT723D iter 8960: loss 2.5889, time 2915.88ms, mfu 2.28%
+model:LGT723D iter 8970: loss 2.4916, time 3338.82ms, mfu 2.32%
+model:LGT723D iter 8980: loss 2.5823, time 3374.26ms, mfu 2.35%
+model:LGT723D iter 8990: loss 2.8711, time 2727.59ms, mfu 2.44%
+------average encoder activity 1.024
+-----------average decoder density 0.4002
+step 9000: train loss 2.8955, val loss 2.7052
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 9000: loss 2.6529, time 48562.56ms, mfu 2.21%
+model:LGT723D iter 9010: loss 2.4023, time 3094.19ms, mfu 2.28%
+model:LGT723D iter 9020: loss 2.6721, time 3365.05ms, mfu 2.31%
+model:LGT723D iter 9030: loss 2.6333, time 2855.69ms, mfu 2.39%
+model:LGT723D iter 9040: loss 2.4703, time 2585.19ms, mfu 2.49%
+------average encoder activity 1.025
+-----------average decoder density 0.4110
+step 9050: train loss 2.7212, val loss 2.6558
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 9050: loss 2.2395, time 48629.34ms, mfu 2.26%
+model:LGT723D iter 9060: loss 2.3661, time 3350.66ms, mfu 2.30%
+model:LGT723D iter 9070: loss 2.5017, time 2952.82ms, mfu 2.37%
+model:LGT723D iter 9080: loss 2.2868, time 2645.72ms, mfu 2.47%
+model:LGT723D iter 9090: loss 2.2004, time 2933.36ms, mfu 2.52%
+------average encoder activity 1.030
+-----------average decoder density 0.4008
+step 9100: train loss 2.7743, val loss 2.6317
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 9100: loss 2.5943, time 48979.86ms, mfu 2.29%
+model:LGT723D iter 9110: loss 2.4988, time 3063.76ms, mfu 2.35%
+model:LGT723D iter 9120: loss 2.5664, time 2834.16ms, mfu 2.43%
+model:LGT723D iter 9130: loss 2.5613, time 2906.75ms, mfu 2.49%
+model:LGT723D iter 9140: loss 2.6112, time 2838.44ms, mfu 2.55%
+------average encoder activity 1.031
+-----------average decoder density 0.3753
+step 9150: train loss 3.3883, val loss 2.9603
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 9150: loss 2.7910, time 49275.52ms, mfu 2.31%
+model:LGT723D iter 9160: loss 2.2991, time 2772.26ms, mfu 2.40%
+model:LGT723D iter 9170: loss 2.6409, time 2903.69ms, mfu 2.47%
+model:LGT723D iter 9180: loss 2.8114, time 2925.01ms, mfu 2.52%
+model:LGT723D iter 9190: loss 2.4477, time 2623.23ms, mfu 2.61%
+------average encoder activity 1.034
+-----------average decoder density 0.3692
+step 9200: train loss 2.8525, val loss 2.6712
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 9200: loss 2.2599, time 49006.36ms, mfu 2.36%
+model:LGT723D iter 9210: loss 2.3751, time 2582.39ms, mfu 2.47%
+model:LGT723D iter 9220: loss 2.4419, time 2845.09ms, mfu 2.53%
+model:LGT723D iter 9230: loss 2.3935, time 3004.90ms, mfu 2.57%
+model:LGT723D iter 9240: loss 2.3258, time 3120.01ms, mfu 2.60%
+------average encoder activity 1.036
+-----------average decoder density 0.3825
+step 9250: train loss 2.9846, val loss 2.7897
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 9250: loss 2.4797, time 49780.23ms, mfu 2.36%
+model:LGT723D iter 9260: loss 2.2950, time 3314.85ms, mfu 2.39%
+model:LGT723D iter 9270: loss 2.7165, time 2923.09ms, mfu 2.45%
+model:LGT723D iter 9280: loss 2.4811, time 3255.51ms, mfu 2.48%
+model:LGT723D iter 9290: loss 2.5544, time 3249.30ms, mfu 2.50%
+------average encoder activity 1.039
+-----------average decoder density 0.3208
+Overriding config with config/train_novel_char3.py:
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-novel-char3'
+eval_interval = 250 # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10 # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False # override via command line if you like
+wandb_project = 'novel'
+wandb_run_name = 'novel'
+
+dataset = 'novel_char3'
+gradient_accumulation_steps = 1
+# gradient_accumulation_steps = 6
+gradient_accumulation_steps = 12
+# batch_size = 12
+batch_size = 2
+# batch_size = 1
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 64 # context of up to 256 previous characters
+block_size = 1024 # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+# n_embd = 182
+dropout = 0.2
+
+# learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+learning_rate = 1e-4 # with baby networks can afford to go a bit higher
+
+# max_iters = 5000
+# lr_decay_iters = 5000 # make equal to max_iters usually
+
+max_iters = 500000
+lr_decay_iters = 500000 # make equal to max_iters usually
+
+min_lr = 1e-5 # learning_rate / 10 usually
+beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100 # not super necessary potentially
+
+# on macbook also add
+# device = 'cpu'  # run on cpu only
+# compile = False # do not torch compile the model
+# init_from ='resume'
+
+
+'''
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM251_4bfeb7b3e1b9c46a2542bb9406173e22 --model=CCM251
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM253_01b622029bb00e0dc9206cae3b0ab559 --model=CCM253 
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559 --model=CCM276
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM278_a97bfe077b316033e3604831d5ad371e --model=CCM278
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM305_52efa1def80492f81622f536ac701226 --model=CCM305
+
+
+out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559
+
+'''
+#### python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+Overriding: init_from = scratch
+Overriding: compile = False
+Overriding: model = LGT723D
+Overriding: n_layer = 70
+Overriding: n_head = 12
+Overriding: share_layer = False
+Overriding: always_save_checkpoint = False
+Overriding: max_iters = 2500999
+Overriding: best_val_loss_force = 10.001
+Overriding: min_lr = 1e-05
+Overriding: dropout = 0.0
+Overriding: eval_interval = 50
+Overriding: force_resave = 0
+Overriding: random_seed = 3
+tokens per iteration will be: 24,576
+found vocab_size = 73440 (inside data/novel_char3/meta.pkl)
+out_dir: out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+Initializing a new model from scratch
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+num decayed parameter tensors: 178, with 111,869,184 parameters
+num non-decayed parameter tensors: 109, with 20,671,873 parameters
+using fused AdamW: True
+------average encoder activity 0.000
+-----------average decoder density 0.0000
+step 0: train loss 5.6483, val loss 5.6469
+model:LGT723D iter 0: loss 5.6846, time 52813.02ms, mfu -100.00%
+model:LGT723D iter 10: loss 5.4309, time 2716.67ms, mfu 3.26%
+model:LGT723D iter 20: loss 5.3144, time 3369.04ms, mfu 3.19%
+model:LGT723D iter 30: loss 5.2495, time 3489.51ms, mfu 3.13%
+model:LGT723D iter 40: loss 5.1878, time 3251.17ms, mfu 3.09%
+------average encoder activity 0.000
+-----------average decoder density 0.3562
+step 50: train loss 5.0777, val loss 5.0658
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 50: loss 5.0366, time 54472.61ms, mfu 2.79%
+model:LGT723D iter 60: loss 4.9139, time 3036.57ms, mfu 2.81%
+model:LGT723D iter 70: loss 4.7998, time 3503.67ms, mfu 2.78%
+model:LGT723D iter 80: loss 4.5094, time 3220.75ms, mfu 2.77%
+model:LGT723D iter 90: loss 4.4838, time 3725.43ms, mfu 2.73%
+------average encoder activity 0.000
+-----------average decoder density 0.2548
+step 100: train loss 4.2962, val loss 4.3061
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 100: loss 4.2614, time 55383.89ms, mfu 2.48%
+model:LGT723D iter 110: loss 4.1443, time 3422.28ms, mfu 2.49%
+model:LGT723D iter 120: loss 4.0695, time 3204.90ms, mfu 2.51%
+model:LGT723D iter 130: loss 4.0962, time 3007.72ms, mfu 2.56%
+model:LGT723D iter 140: loss 4.0105, time 3378.30ms, mfu 2.56%
+------average encoder activity 0.001
+-----------average decoder density 0.1367
+step 150: train loss 3.9687, val loss 3.9403
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 150: loss 3.8796, time 55620.79ms, mfu 2.32%
+model:LGT723D iter 160: loss 3.7462, time 3065.51ms, mfu 2.38%
+model:LGT723D iter 170: loss 3.8560, time 3216.35ms, mfu 2.42%
+model:LGT723D iter 180: loss 3.8728, time 3351.62ms, mfu 2.44%
+model:LGT723D iter 190: loss 4.0863, time 3306.41ms, mfu 2.46%
+------average encoder activity 0.023
+-----------average decoder density 0.1118
+step 200: train loss 3.8926, val loss 3.8416
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 200: loss 3.8884, time 56228.77ms, mfu 2.23%
+model:LGT723D iter 210: loss 3.7816, time 3848.63ms, mfu 2.24%
+model:LGT723D iter 220: loss 3.7675, time 3266.53ms, mfu 2.29%
+model:LGT723D iter 230: loss 3.7233, time 3408.57ms, mfu 2.32%
+model:LGT723D iter 240: loss 3.8336, time 3118.98ms, mfu 2.37%
+------average encoder activity 0.039
+-----------average decoder density 0.1161
+step 250: train loss 3.8411, val loss 3.7894
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 250: loss 3.7292, time 56591.35ms, mfu 2.15%
+model:LGT723D iter 260: loss 3.8195, time 3211.90ms, mfu 2.21%
+model:LGT723D iter 270: loss 3.7837, time 3458.79ms, mfu 2.24%
+model:LGT723D iter 280: loss 3.8533, time 2669.73ms, mfu 2.35%
+model:LGT723D iter 290: loss 3.7076, time 3297.70ms, mfu 2.38%
+------average encoder activity 0.049
+-----------average decoder density 0.1052
+step 300: train loss 3.7647, val loss 3.7131
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 300: loss 4.0964, time 53943.77ms, mfu 2.16%
+model:LGT723D iter 310: loss 3.6580, time 3089.10ms, mfu 2.23%
+model:LGT723D iter 320: loss 3.8854, time 3048.65ms, mfu 2.30%
+model:LGT723D iter 330: loss 3.9860, time 3240.36ms, mfu 2.34%
+model:LGT723D iter 340: loss 3.6536, time 3488.51ms, mfu 2.36%
+------average encoder activity 0.059
+-----------average decoder density 0.1125
+step 350: train loss 3.7172, val loss 3.6624
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 350: loss 3.6756, time 56984.94ms, mfu 2.14%
+model:LGT723D iter 360: loss 3.7140, time 3358.25ms, mfu 2.19%
+model:LGT723D iter 370: loss 3.7590, time 3285.64ms, mfu 2.24%
+model:LGT723D iter 380: loss 3.8384, time 3014.88ms, mfu 2.31%
+model:LGT723D iter 390: loss 4.0082, time 3331.85ms, mfu 2.34%
+------average encoder activity 0.068
+-----------average decoder density 0.1013
+step 400: train loss 3.6794, val loss 3.6263
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 400: loss 3.8312, time 54385.48ms, mfu 2.13%
+model:LGT723D iter 410: loss 3.5310, time 3550.24ms, mfu 2.16%
+model:LGT723D iter 420: loss 3.4453, time 3337.60ms, mfu 2.21%
+model:LGT723D iter 430: loss 3.7186, time 3081.44ms, mfu 2.28%
+model:LGT723D iter 440: loss 3.4625, time 3397.92ms, mfu 2.31%
+------average encoder activity 0.076
+-----------average decoder density 0.0830
+step 450: train loss 3.6073, val loss 3.6064
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 450: loss 3.5365, time 58839.79ms, mfu 2.09%
+model:LGT723D iter 460: loss 3.6278, time 2906.21ms, mfu 2.19%
+model:LGT723D iter 470: loss 3.6727, time 2800.48ms, mfu 2.29%
+model:LGT723D iter 480: loss 3.5485, time 2955.54ms, mfu 2.36%
+model:LGT723D iter 490: loss 3.6954, time 2845.70ms, mfu 2.43%
+------average encoder activity 0.084
+-----------average decoder density 0.0788
+step 500: train loss 3.5892, val loss 3.5506
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 500: loss 3.4112, time 49310.15ms, mfu 2.21%
+model:LGT723D iter 510: loss 3.8718, time 2805.08ms, mfu 2.30%
+model:LGT723D iter 520: loss 3.6672, time 2901.07ms, mfu 2.38%
+model:LGT723D iter 530: loss 3.4046, time 2913.85ms, mfu 2.44%
+model:LGT723D iter 540: loss 3.3441, time 2594.95ms, mfu 2.54%
+------average encoder activity 0.091
+-----------average decoder density 0.0855
+step 550: train loss 3.5640, val loss 3.5170
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 550: loss 3.5699, time 48480.93ms, mfu 2.30%
+model:LGT723D iter 560: loss 3.5048, time 3258.15ms, mfu 2.34%
+model:LGT723D iter 570: loss 3.6456, time 2821.55ms, mfu 2.42%
+model:LGT723D iter 580: loss 3.4724, time 2642.05ms, mfu 2.52%
+model:LGT723D iter 590: loss 3.5138, time 2909.71ms, mfu 2.57%
+------average encoder activity 0.099
+-----------average decoder density 0.0736
+step 600: train loss 3.5354, val loss 3.4909
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 600: loss 3.3316, time 49363.48ms, mfu 2.33%
+model:LGT723D iter 610: loss 3.5661, time 2626.03ms, mfu 2.43%
+model:LGT723D iter 620: loss 3.4542, time 2848.74ms, mfu 2.50%
+model:LGT723D iter 630: loss 3.5958, time 2880.76ms, mfu 2.56%
+model:LGT723D iter 640: loss 3.3270, time 2490.88ms, mfu 2.66%
+------average encoder activity 0.108
+-----------average decoder density 0.0730
+step 650: train loss 3.4649, val loss 3.4507
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 650: loss 3.3726, time 48726.69ms, mfu 2.41%
+model:LGT723D iter 660: loss 3.5721, time 2978.29ms, mfu 2.47%
+model:LGT723D iter 670: loss 3.7340, time 2864.45ms, mfu 2.53%
+model:LGT723D iter 680: loss 3.4049, time 2597.95ms, mfu 2.62%
+model:LGT723D iter 690: loss 3.4107, time 3105.85ms, mfu 2.64%
+------average encoder activity 0.119
+-----------average decoder density 0.0783
+step 700: train loss 3.4680, val loss 3.4349
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 700: loss 3.5345, time 49055.87ms, mfu 2.39%
+model:LGT723D iter 710: loss 3.2757, time 2785.86ms, mfu 2.47%
+model:LGT723D iter 720: loss 3.2419, time 2652.80ms, mfu 2.56%
+model:LGT723D iter 730: loss 3.2513, time 3050.35ms, mfu 2.59%
+model:LGT723D iter 740: loss 3.5429, time 3344.06ms, mfu 2.60%
+------average encoder activity 0.128
+-----------average decoder density 0.0761
+step 750: train loss 3.4897, val loss 3.4196
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 750: loss 3.3593, time 49202.72ms, mfu 2.35%
+model:LGT723D iter 760: loss 3.3415, time 2581.72ms, mfu 2.46%
+model:LGT723D iter 770: loss 3.2670, time 3154.60ms, mfu 2.50%
+model:LGT723D iter 780: loss 3.5248, time 3357.19ms, mfu 2.51%
+model:LGT723D iter 790: loss 3.3737, time 3260.34ms, mfu 2.53%
+------average encoder activity 0.134
+-----------average decoder density 0.0749
+step 800: train loss 3.4097, val loss 3.3709
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 800: loss 3.2269, time 48746.52ms, mfu 2.30%
+model:LGT723D iter 810: loss 3.4176, time 2924.26ms, mfu 2.37%
+model:LGT723D iter 820: loss 3.5608, time 3392.39ms, mfu 2.39%
+model:LGT723D iter 830: loss 3.4025, time 3325.42ms, mfu 2.42%
+model:LGT723D iter 840: loss 3.4214, time 2889.49ms, mfu 2.48%
+------average encoder activity 0.144
+-----------average decoder density 0.0802
+step 850: train loss 3.3971, val loss 3.3739
+model:LGT723D iter 850: loss 3.7537, time 46197.28ms, mfu 2.25%
+model:LGT723D iter 860: loss 3.5524, time 3380.94ms, mfu 2.29%
+model:LGT723D iter 870: loss 3.6723, time 2896.01ms, mfu 2.37%
+model:LGT723D iter 880: loss 3.6620, time 3159.44ms, mfu 2.41%
+model:LGT723D iter 890: loss 3.2742, time 3389.03ms, mfu 2.43%
+------average encoder activity 0.151
+-----------average decoder density 0.0816
+step 900: train loss 3.3809, val loss 3.3565
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 900: loss 3.4330, time 48980.32ms, mfu 2.20%
+model:LGT723D iter 910: loss 3.4808, time 3254.50ms, mfu 2.26%
+model:LGT723D iter 920: loss 3.3269, time 2901.71ms, mfu 2.34%
+model:LGT723D iter 930: loss 3.2656, time 3163.38ms, mfu 2.38%
+model:LGT723D iter 940: loss 3.4698, time 3343.31ms, mfu 2.41%
+------average encoder activity 0.163
+-----------average decoder density 0.0791
+step 950: train loss 3.3935, val loss 3.3786
+model:LGT723D iter 950: loss 3.2722, time 47021.22ms, mfu 2.19%
+model:LGT723D iter 960: loss 3.0887, time 3065.27ms, mfu 2.26%
+model:LGT723D iter 970: loss 3.4202, time 2974.83ms, mfu 2.33%
+model:LGT723D iter 980: loss 3.3431, time 3046.62ms, mfu 2.39%
+model:LGT723D iter 990: loss 3.5347, time 2935.29ms, mfu 2.45%
+------average encoder activity 0.171
+-----------average decoder density 0.0902
+step 1000: train loss 3.3458, val loss 3.3019
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1000: loss 3.4659, time 49412.23ms, mfu 2.22%
+model:LGT723D iter 1010: loss 3.3991, time 2665.61ms, mfu 2.33%
+model:LGT723D iter 1020: loss 3.3458, time 2589.70ms, mfu 2.44%
+model:LGT723D iter 1030: loss 3.4664, time 3088.78ms, mfu 2.48%
+model:LGT723D iter 1040: loss 3.4491, time 3377.40ms, mfu 2.50%
+------average encoder activity 0.178
+-----------average decoder density 0.0856
+step 1050: train loss 3.3404, val loss 3.2781
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1050: loss 3.4897, time 49693.47ms, mfu 2.26%
+model:LGT723D iter 1060: loss 3.0986, time 3017.29ms, mfu 2.33%
+model:LGT723D iter 1070: loss 3.0847, time 2590.06ms, mfu 2.44%
+model:LGT723D iter 1080: loss 2.5716, time 3137.32ms, mfu 2.48%
+model:LGT723D iter 1090: loss 3.6223, time 3313.24ms, mfu 2.50%
+------average encoder activity 0.185
+-----------average decoder density 0.0907
+step 1100: train loss 3.3271, val loss 3.2690
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1100: loss 3.5902, time 49894.31ms, mfu 2.26%
+model:LGT723D iter 1110: loss 3.2675, time 3081.33ms, mfu 2.32%
+model:LGT723D iter 1120: loss 3.4810, time 2598.41ms, mfu 2.43%
+model:LGT723D iter 1130: loss 3.1823, time 3039.84ms, mfu 2.48%
+model:LGT723D iter 1140: loss 3.1181, time 3307.25ms, mfu 2.50%
+------average encoder activity 0.196
+-----------average decoder density 0.0932
+step 1150: train loss 3.3099, val loss 3.2867
+model:LGT723D iter 1150: loss 3.2698, time 46405.44ms, mfu 2.27%
+model:LGT723D iter 1160: loss 3.6547, time 3350.88ms, mfu 2.31%
+model:LGT723D iter 1170: loss 3.3789, time 2878.65ms, mfu 2.38%
+model:LGT723D iter 1180: loss 3.1153, time 3268.00ms, mfu 2.41%
+model:LGT723D iter 1190: loss 3.1975, time 3325.98ms, mfu 2.44%
+------average encoder activity 0.203
+-----------average decoder density 0.0984
+step 1200: train loss 3.2881, val loss 3.2409
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1200: loss 3.2355, time 50143.07ms, mfu 2.21%
+model:LGT723D iter 1210: loss 2.9879, time 3069.28ms, mfu 2.28%
+model:LGT723D iter 1220: loss 3.4405, time 3640.96ms, mfu 2.29%
+model:LGT723D iter 1230: loss 3.0776, time 3607.17ms, mfu 2.31%
+model:LGT723D iter 1240: loss 3.3869, time 3118.97ms, mfu 2.36%
+------average encoder activity 0.212
+-----------average decoder density 0.1001
+step 1250: train loss 3.2717, val loss 3.2384
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1250: loss 3.2421, time 50367.90ms, mfu 2.14%
+model:LGT723D iter 1260: loss 2.9100, time 3233.30ms, mfu 2.20%
+model:LGT723D iter 1270: loss 2.9184, time 2787.21ms, mfu 2.30%
+model:LGT723D iter 1280: loss 3.5410, time 3350.09ms, mfu 2.33%
+model:LGT723D iter 1290: loss 2.7334, time 3278.97ms, mfu 2.37%
+------average encoder activity 0.218
+-----------average decoder density 0.1014
+step 1300: train loss 3.2605, val loss 3.2177
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1300: loss 3.4581, time 50172.02ms, mfu 2.15%
+model:LGT723D iter 1310: loss 3.2429, time 3549.78ms, mfu 2.19%
+model:LGT723D iter 1320: loss 2.9309, time 3323.56ms, mfu 2.23%
+model:LGT723D iter 1330: loss 3.1399, time 2859.60ms, mfu 2.32%
+model:LGT723D iter 1340: loss 3.4140, time 3144.62ms, mfu 2.37%
+------average encoder activity 0.225
+-----------average decoder density 0.1053
+step 1350: train loss 3.2512, val loss 3.2166
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1350: loss 3.1499, time 49592.53ms, mfu 2.15%
+model:LGT723D iter 1360: loss 2.8581, time 3180.62ms, mfu 2.21%
+model:LGT723D iter 1370: loss 3.3798, time 3511.92ms, mfu 2.24%
+model:LGT723D iter 1380: loss 2.8772, time 3629.09ms, mfu 2.26%
+model:LGT723D iter 1390: loss 3.3179, time 3082.37ms, mfu 2.32%
+------average encoder activity 0.236
+-----------average decoder density 0.1063
+step 1400: train loss 3.2319, val loss 3.2191
+model:LGT723D iter 1400: loss 3.3628, time 48563.84ms, mfu 2.11%
+model:LGT723D iter 1410: loss 3.3806, time 3570.25ms, mfu 2.15%
+model:LGT723D iter 1420: loss 3.0919, time 3426.29ms, mfu 2.19%
+model:LGT723D iter 1430: loss 3.1931, time 3092.87ms, mfu 2.26%
+model:LGT723D iter 1440: loss 3.5434, time 3596.95ms, mfu 2.28%
+------average encoder activity 0.243
+-----------average decoder density 0.1121
+step 1450: train loss 3.2453, val loss 3.2032
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1450: loss 3.5361, time 49847.39ms, mfu 2.07%
+model:LGT723D iter 1460: loss 3.0245, time 3218.21ms, mfu 2.13%
+model:LGT723D iter 1470: loss 3.1955, time 3617.93ms, mfu 2.17%
+model:LGT723D iter 1480: loss 3.2154, time 3304.39ms, mfu 2.22%
+model:LGT723D iter 1490: loss 3.1922, time 3244.10ms, mfu 2.27%
+------average encoder activity 0.252
+-----------average decoder density 0.1139
+step 1500: train loss 3.2455, val loss 3.2032
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1500: loss 3.2476, time 50639.55ms, mfu 2.06%
+model:LGT723D iter 1510: loss 3.4705, time 3168.90ms, mfu 2.13%
+model:LGT723D iter 1520: loss 3.1062, time 3575.35ms, mfu 2.17%
+model:LGT723D iter 1530: loss 2.8500, time 3387.67ms, mfu 2.21%
+model:LGT723D iter 1540: loss 3.7692, time 2901.14ms, mfu 2.29%
+------average encoder activity 0.260
+-----------average decoder density 0.1164
+step 1550: train loss 3.2287, val loss 3.1968
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1550: loss 3.2460, time 50281.15ms, mfu 2.08%
+model:LGT723D iter 1560: loss 3.3599, time 3654.42ms, mfu 2.12%
+model:LGT723D iter 1570: loss 3.2815, time 3287.47ms, mfu 2.17%
+model:LGT723D iter 1580: loss 3.2480, time 3316.93ms, mfu 2.22%
+model:LGT723D iter 1590: loss 3.3067, time 3760.56ms, mfu 2.24%
+------average encoder activity 0.269
+-----------average decoder density 0.1244
+step 1600: train loss 3.1944, val loss 3.1771
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1600: loss 3.0495, time 49843.64ms, mfu 2.03%
+model:LGT723D iter 1610: loss 3.1918, time 2888.20ms, mfu 2.13%
+model:LGT723D iter 1620: loss 3.4155, time 3038.50ms, mfu 2.21%
+model:LGT723D iter 1630: loss 3.1236, time 2818.93ms, mfu 2.30%
+model:LGT723D iter 1640: loss 3.3544, time 2871.29ms, mfu 2.38%
+------average encoder activity 0.274
+-----------average decoder density 0.1184
+step 1650: train loss 3.1906, val loss 3.1953
+model:LGT723D iter 1650: loss 2.9864, time 48054.08ms, mfu 2.16%
+model:LGT723D iter 1660: loss 3.0340, time 3156.85ms, mfu 2.23%
+model:LGT723D iter 1670: loss 3.3747, time 2900.45ms, mfu 2.31%
+model:LGT723D iter 1680: loss 3.0635, time 3490.10ms, mfu 2.33%
+model:LGT723D iter 1690: loss 3.2194, time 3592.00ms, mfu 2.34%
+------average encoder activity 0.283
+-----------average decoder density 0.1258
+step 1700: train loss 3.1980, val loss 3.1747
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1700: loss 3.1731, time 50393.89ms, mfu 2.13%
+model:LGT723D iter 1710: loss 3.1584, time 3364.31ms, mfu 2.18%
+model:LGT723D iter 1720: loss 3.2465, time 3395.11ms, mfu 2.22%
+model:LGT723D iter 1730: loss 3.1348, time 2947.59ms, mfu 2.30%
+model:LGT723D iter 1740: loss 3.3262, time 3326.50ms, mfu 2.33%
+------average encoder activity 0.292
+-----------average decoder density 0.1268
+step 1750: train loss 3.1837, val loss 3.1563
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1750: loss 3.4015, time 50466.48ms, mfu 2.12%
+model:LGT723D iter 1760: loss 3.4086, time 3017.43ms, mfu 2.20%
+model:LGT723D iter 1770: loss 2.9447, time 3617.73ms, mfu 2.22%
+model:LGT723D iter 1780: loss 3.1346, time 3507.10ms, mfu 2.25%
+model:LGT723D iter 1790: loss 3.0004, time 3514.14ms, mfu 2.28%
+------average encoder activity 0.300
+-----------average decoder density 0.1316
+step 1800: train loss 3.1622, val loss 3.1665
+model:LGT723D iter 1800: loss 3.0241, time 49219.30ms, mfu 2.07%
+model:LGT723D iter 1810: loss 3.2682, time 3223.60ms, mfu 2.14%
+model:LGT723D iter 1820: loss 3.2336, time 3340.52ms, mfu 2.19%
+model:LGT723D iter 1830: loss 3.2563, time 3302.74ms, mfu 2.24%
+model:LGT723D iter 1840: loss 3.2383, time 3176.33ms, mfu 2.29%
+------average encoder activity 0.309
+-----------average decoder density 0.1291
+step 1850: train loss 3.1230, val loss 3.1312
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1850: loss 2.9849, time 50345.02ms, mfu 2.08%
+model:LGT723D iter 1860: loss 3.1760, time 3595.56ms, mfu 2.12%
+model:LGT723D iter 1870: loss 3.0190, time 3560.97ms, mfu 2.15%
+model:LGT723D iter 1880: loss 3.3475, time 3099.81ms, mfu 2.22%
+model:LGT723D iter 1890: loss 3.1878, time 3683.22ms, mfu 2.24%
+------average encoder activity 0.314
+-----------average decoder density 0.1341
+step 1900: train loss 3.1413, val loss 3.1334
+model:LGT723D iter 1900: loss 2.9066, time 49164.80ms, mfu 2.04%
+model:LGT723D iter 1910: loss 3.0883, time 3110.40ms, mfu 2.12%
+model:LGT723D iter 1920: loss 3.1582, time 3641.35ms, mfu 2.15%
+model:LGT723D iter 1930: loss 3.2066, time 3636.09ms, mfu 2.18%
+model:LGT723D iter 1940: loss 3.2913, time 3230.76ms, mfu 2.23%
+------average encoder activity 0.324
+-----------average decoder density 0.1306
+step 1950: train loss 3.1508, val loss 3.1084
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 1950: loss 2.9750, time 50668.37ms, mfu 2.03%
+model:LGT723D iter 1960: loss 3.0065, time 3594.45ms, mfu 2.07%
+model:LGT723D iter 1970: loss 3.1146, time 3023.08ms, mfu 2.16%
+model:LGT723D iter 1980: loss 3.0737, time 3566.00ms, mfu 2.19%
+model:LGT723D iter 1990: loss 3.3402, time 3469.97ms, mfu 2.22%
+------average encoder activity 0.330
+-----------average decoder density 0.1354
+step 2000: train loss 3.1328, val loss 3.1108
+model:LGT723D iter 2000: loss 3.3520, time 48388.45ms, mfu 2.02%
+model:LGT723D iter 2010: loss 2.9931, time 3667.22ms, mfu 2.06%
+model:LGT723D iter 2020: loss 3.3286, time 3641.32ms, mfu 2.10%
+model:LGT723D iter 2030: loss 3.3651, time 3173.32ms, mfu 2.17%
+model:LGT723D iter 2040: loss 3.3033, time 3638.53ms, mfu 2.19%
+------average encoder activity 0.336
+-----------average decoder density 0.1378
+step 2050: train loss 3.1352, val loss 3.1272
+model:LGT723D iter 2050: loss 3.1208, time 48160.36ms, mfu 1.99%
+model:LGT723D iter 2060: loss 3.2184, time 3068.79ms, mfu 2.08%
+model:LGT723D iter 2070: loss 2.9329, time 3391.64ms, mfu 2.13%
+model:LGT723D iter 2080: loss 2.9888, time 3480.38ms, mfu 2.17%
+model:LGT723D iter 2090: loss 3.2962, time 3235.95ms, mfu 2.23%
+------average encoder activity 0.342
+-----------average decoder density 0.1538
+step 2100: train loss 3.1346, val loss 3.1096
+model:LGT723D iter 2100: loss 2.9377, time 48232.55ms, mfu 2.03%
+model:LGT723D iter 2110: loss 3.1487, time 3367.53ms, mfu 2.09%
+model:LGT723D iter 2120: loss 3.2567, time 3375.44ms, mfu 2.14%
+model:LGT723D iter 2130: loss 2.9683, time 2931.00ms, mfu 2.23%
+model:LGT723D iter 2140: loss 2.9867, time 3349.39ms, mfu 2.27%
+------average encoder activity 0.345
+-----------average decoder density 0.1372
+step 2150: train loss 3.1149, val loss 3.0901
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2150: loss 3.2172, time 49773.35ms, mfu 2.06%
+model:LGT723D iter 2160: loss 3.1883, time 3259.07ms, mfu 2.12%
+model:LGT723D iter 2170: loss 3.1080, time 3759.51ms, mfu 2.15%
+model:LGT723D iter 2180: loss 3.4421, time 3715.32ms, mfu 2.17%
+model:LGT723D iter 2190: loss 2.6463, time 3308.96ms, mfu 2.22%
+------average encoder activity 0.350
+-----------average decoder density 0.1568
+step 2200: train loss 3.0979, val loss 3.0830
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2200: loss 3.2652, time 50450.01ms, mfu 2.02%
+model:LGT723D iter 2210: loss 3.3431, time 3330.41ms, mfu 2.08%
+model:LGT723D iter 2220: loss 3.2545, time 3169.04ms, mfu 2.15%
+model:LGT723D iter 2230: loss 3.2305, time 3542.85ms, mfu 2.19%
+model:LGT723D iter 2240: loss 3.1309, time 3288.66ms, mfu 2.24%
+------average encoder activity 0.357
+-----------average decoder density 0.1557
+step 2250: train loss 3.1023, val loss 3.0811
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2250: loss 3.1637, time 49822.42ms, mfu 2.03%
+model:LGT723D iter 2260: loss 2.5067, time 3230.57ms, mfu 2.10%
+model:LGT723D iter 2270: loss 3.2917, time 2723.42ms, mfu 2.22%
+model:LGT723D iter 2280: loss 3.0164, time 3148.42ms, mfu 2.28%
+model:LGT723D iter 2290: loss 2.9116, time 3075.28ms, mfu 2.34%
+------average encoder activity 0.361
+-----------average decoder density 0.1498
+step 2300: train loss 3.0938, val loss 3.0815
+model:LGT723D iter 2300: loss 3.2697, time 48021.26ms, mfu 2.12%
+model:LGT723D iter 2310: loss 3.1359, time 2778.55ms, mfu 2.23%
+model:LGT723D iter 2320: loss 3.0487, time 3351.28ms, mfu 2.27%
+model:LGT723D iter 2330: loss 2.5924, time 2849.66ms, mfu 2.35%
+model:LGT723D iter 2340: loss 3.0272, time 3148.63ms, mfu 2.40%
+------average encoder activity 0.370
+-----------average decoder density 0.1648
+step 2350: train loss 3.0984, val loss 3.0967
+model:LGT723D iter 2350: loss 3.1601, time 49103.62ms, mfu 2.18%
+model:LGT723D iter 2360: loss 3.3137, time 3089.42ms, mfu 2.24%
+model:LGT723D iter 2370: loss 3.1677, time 3621.80ms, mfu 2.26%
+model:LGT723D iter 2380: loss 2.8265, time 3685.78ms, mfu 2.28%
+model:LGT723D iter 2390: loss 2.8851, time 3068.26ms, mfu 2.34%
+------average encoder activity 0.375
+-----------average decoder density 0.1481
+step 2400: train loss 3.0843, val loss 3.0888
+model:LGT723D iter 2400: loss 3.0430, time 49051.67ms, mfu 2.12%
+model:LGT723D iter 2410: loss 2.8518, time 3441.97ms, mfu 2.17%
+model:LGT723D iter 2420: loss 2.9487, time 3028.77ms, mfu 2.24%
+model:LGT723D iter 2430: loss 3.0921, time 3531.82ms, mfu 2.27%
+model:LGT723D iter 2440: loss 2.9287, time 3561.37ms, mfu 2.29%
+------average encoder activity 0.381
+-----------average decoder density 0.1662
+step 2450: train loss 3.0559, val loss 3.0503
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2450: loss 2.9074, time 49441.22ms, mfu 2.08%
+model:LGT723D iter 2460: loss 3.3207, time 3421.16ms, mfu 2.13%
+model:LGT723D iter 2470: loss 3.1366, time 3281.58ms, mfu 2.19%
+model:LGT723D iter 2480: loss 3.1043, time 2805.60ms, mfu 2.28%
+model:LGT723D iter 2490: loss 3.1151, time 3335.77ms, mfu 2.32%
+------average encoder activity 0.385
+-----------average decoder density 0.1527
+step 2500: train loss 3.0630, val loss 3.0659
+model:LGT723D iter 2500: loss 3.1088, time 49283.50ms, mfu 2.11%
+model:LGT723D iter 2510: loss 3.2634, time 3389.14ms, mfu 2.16%
+model:LGT723D iter 2520: loss 2.8355, time 3274.80ms, mfu 2.21%
+model:LGT723D iter 2530: loss 3.2413, time 3655.71ms, mfu 2.23%
+model:LGT723D iter 2540: loss 3.0252, time 3371.09ms, mfu 2.27%
+------average encoder activity 0.390
+-----------average decoder density 0.1777
+step 2550: train loss 3.0632, val loss 3.0331
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2550: loss 3.1392, time 50600.86ms, mfu 2.06%
+model:LGT723D iter 2560: loss 2.8789, time 3653.81ms, mfu 2.10%
+model:LGT723D iter 2570: loss 3.1749, time 3066.55ms, mfu 2.18%
+model:LGT723D iter 2580: loss 3.1747, time 3500.09ms, mfu 2.21%
+model:LGT723D iter 2590: loss 2.6808, time 3655.98ms, mfu 2.23%
+------average encoder activity 0.396
+-----------average decoder density 0.1665
+step 2600: train loss 3.0592, val loss 3.0588
+model:LGT723D iter 2600: loss 2.8428, time 48526.52ms, mfu 2.03%
+model:LGT723D iter 2610: loss 3.1970, time 3489.70ms, mfu 2.08%
+model:LGT723D iter 2620: loss 2.7902, time 3488.55ms, mfu 2.12%
+model:LGT723D iter 2630: loss 3.4031, time 3032.27ms, mfu 2.20%
+model:LGT723D iter 2640: loss 3.3424, time 3297.29ms, mfu 2.25%
+------average encoder activity 0.404
+-----------average decoder density 0.1626
+step 2650: train loss 3.0504, val loss 3.0447
+model:LGT723D iter 2650: loss 3.0660, time 49383.88ms, mfu 2.04%
+model:LGT723D iter 2660: loss 3.0755, time 2907.47ms, mfu 2.14%
+model:LGT723D iter 2670: loss 2.8379, time 3299.11ms, mfu 2.20%
+model:LGT723D iter 2680: loss 3.1413, time 3227.81ms, mfu 2.25%
+model:LGT723D iter 2690: loss 3.0887, time 2620.63ms, mfu 2.36%
+------average encoder activity 0.412
+-----------average decoder density 0.1797
+step 2700: train loss 3.0430, val loss 3.0326
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2700: loss 3.2239, time 50126.96ms, mfu 2.15%
+model:LGT723D iter 2710: loss 2.6483, time 3454.82ms, mfu 2.19%
+model:LGT723D iter 2720: loss 3.0003, time 3074.57ms, mfu 2.26%
+model:LGT723D iter 2730: loss 2.8739, time 3696.22ms, mfu 2.27%
+model:LGT723D iter 2740: loss 2.9219, time 3472.51ms, mfu 2.30%
+------average encoder activity 0.415
+-----------average decoder density 0.1704
+step 2750: train loss 3.0631, val loss 3.0211
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2750: loss 2.9473, time 50528.41ms, mfu 2.08%
+model:LGT723D iter 2760: loss 3.1217, time 3573.78ms, mfu 2.12%
+model:LGT723D iter 2770: loss 3.0177, time 2925.67ms, mfu 2.21%
+model:LGT723D iter 2780: loss 2.9687, time 3206.37ms, mfu 2.27%
+model:LGT723D iter 2790: loss 2.9920, time 3051.51ms, mfu 2.33%
+------average encoder activity 0.420
+-----------average decoder density 0.1713
+step 2800: train loss 3.0309, val loss 3.0045
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2800: loss 2.9612, time 49708.26ms, mfu 2.12%
+model:LGT723D iter 2810: loss 2.8853, time 3617.71ms, mfu 2.15%
+model:LGT723D iter 2820: loss 3.1983, time 3659.24ms, mfu 2.18%
+model:LGT723D iter 2830: loss 3.0044, time 3055.42ms, mfu 2.25%
+model:LGT723D iter 2840: loss 3.0211, time 3496.45ms, mfu 2.28%
+------average encoder activity 0.426
+-----------average decoder density 0.1605
+step 2850: train loss 3.0022, val loss 3.0251
+model:LGT723D iter 2850: loss 2.9441, time 48740.19ms, mfu 2.07%
+model:LGT723D iter 2860: loss 3.3497, time 3062.22ms, mfu 2.15%
+model:LGT723D iter 2870: loss 2.6543, time 3437.05ms, mfu 2.19%
+model:LGT723D iter 2880: loss 3.2011, time 3295.03ms, mfu 2.24%
+model:LGT723D iter 2890: loss 3.2088, time 3047.51ms, mfu 2.31%
+------average encoder activity 0.429
+-----------average decoder density 0.1910
+step 2900: train loss 3.0056, val loss 3.0010
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 2900: loss 3.0955, time 50017.78ms, mfu 2.09%
+model:LGT723D iter 2910: loss 3.5844, time 3609.06ms, mfu 2.13%
+model:LGT723D iter 2920: loss 3.0580, time 3060.03ms, mfu 2.21%
+model:LGT723D iter 2930: loss 2.6236, time 3643.49ms, mfu 2.23%
+model:LGT723D iter 2940: loss 2.9871, time 3601.41ms, mfu 2.25%
+------average encoder activity 0.437
+-----------average decoder density 0.2006
+step 2950: train loss 3.0119, val loss 3.0268
+model:LGT723D iter 2950: loss 3.1661, time 48712.58ms, mfu 2.04%
+model:LGT723D iter 2960: loss 3.1139, time 3649.92ms, mfu 2.08%
+model:LGT723D iter 2970: loss 3.0818, time 3639.87ms, mfu 2.12%
+model:LGT723D iter 2980: loss 2.7299, time 3055.81ms, mfu 2.19%
+model:LGT723D iter 2990: loss 2.6382, time 3674.12ms, mfu 2.22%
+------average encoder activity 0.443
+-----------average decoder density 0.1933
+step 3000: train loss 2.9983, val loss 2.9921
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3000: loss 3.0901, time 50135.35ms, mfu 2.01%
+model:LGT723D iter 3010: loss 2.6679, time 2798.46ms, mfu 2.13%
+model:LGT723D iter 3020: loss 3.0249, time 3064.56ms, mfu 2.20%
+model:LGT723D iter 3030: loss 3.2244, time 2747.17ms, mfu 2.30%
+model:LGT723D iter 3040: loss 3.1485, time 3196.27ms, mfu 2.35%
+------average encoder activity 0.449
+-----------average decoder density 0.1806
+step 3050: train loss 3.0083, val loss 2.9806
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3050: loss 3.2524, time 50175.05ms, mfu 2.13%
+model:LGT723D iter 3060: loss 2.8459, time 3063.87ms, mfu 2.21%
+model:LGT723D iter 3070: loss 2.8930, time 3558.84ms, mfu 2.24%
+model:LGT723D iter 3080: loss 2.7624, time 3532.77ms, mfu 2.26%
+model:LGT723D iter 3090: loss 3.0193, time 2871.80ms, mfu 2.34%
+------average encoder activity 0.455
+-----------average decoder density 0.1830
+step 3100: train loss 2.9772, val loss 2.9781
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3100: loss 2.8660, time 50036.60ms, mfu 2.13%
+model:LGT723D iter 3110: loss 3.0477, time 3761.69ms, mfu 2.15%
+model:LGT723D iter 3120: loss 2.6808, time 3086.95ms, mfu 2.22%
+model:LGT723D iter 3130: loss 2.8181, time 3626.51ms, mfu 2.24%
+model:LGT723D iter 3140: loss 3.0587, time 3636.89ms, mfu 2.26%
+------average encoder activity 0.459
+-----------average decoder density 0.1819
+step 3150: train loss 3.0029, val loss 3.0015
+model:LGT723D iter 3150: loss 3.0428, time 48575.86ms, mfu 2.05%
+model:LGT723D iter 3160: loss 3.0007, time 3052.45ms, mfu 2.14%
+model:LGT723D iter 3170: loss 2.9391, time 3057.96ms, mfu 2.21%
+model:LGT723D iter 3180: loss 3.1819, time 2792.80ms, mfu 2.31%
+model:LGT723D iter 3190: loss 3.0430, time 3369.12ms, mfu 2.34%
+------average encoder activity 0.463
+-----------average decoder density 0.1819
+step 3200: train loss 2.9937, val loss 2.9810
+model:LGT723D iter 3200: loss 2.6612, time 48080.84ms, mfu 2.13%
+model:LGT723D iter 3210: loss 2.6649, time 2839.76ms, mfu 2.22%
+model:LGT723D iter 3220: loss 3.0810, time 3103.59ms, mfu 2.29%
+model:LGT723D iter 3230: loss 2.9685, time 3176.62ms, mfu 2.34%
+model:LGT723D iter 3240: loss 3.3592, time 2770.48ms, mfu 2.42%
+------average encoder activity 0.468
+-----------average decoder density 0.1850
+step 3250: train loss 2.9947, val loss 2.9705
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3250: loss 3.0040, time 50152.51ms, mfu 2.20%
+model:LGT723D iter 3260: loss 2.9844, time 3591.51ms, mfu 2.22%
+model:LGT723D iter 3270: loss 2.8610, time 3241.68ms, mfu 2.27%
+model:LGT723D iter 3280: loss 2.8040, time 3641.71ms, mfu 2.29%
+model:LGT723D iter 3290: loss 2.8285, time 3611.33ms, mfu 2.31%
+------average encoder activity 0.472
+-----------average decoder density 0.1917
+step 3300: train loss 2.9646, val loss 2.9566
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3300: loss 3.3527, time 50004.12ms, mfu 2.09%
+model:LGT723D iter 3310: loss 2.9946, time 3213.56ms, mfu 2.16%
+model:LGT723D iter 3320: loss 2.9172, time 3307.88ms, mfu 2.21%
+model:LGT723D iter 3330: loss 2.8687, time 3086.54ms, mfu 2.28%
+model:LGT723D iter 3340: loss 2.7021, time 3806.74ms, mfu 2.28%
+------average encoder activity 0.480
+-----------average decoder density 0.2415
+step 3350: train loss 2.9845, val loss 2.9595
+model:LGT723D iter 3350: loss 2.9581, time 49059.47ms, mfu 2.07%
+model:LGT723D iter 3360: loss 2.7227, time 3208.61ms, mfu 2.14%
+model:LGT723D iter 3370: loss 3.0464, time 3631.07ms, mfu 2.17%
+model:LGT723D iter 3380: loss 2.6104, time 3660.21ms, mfu 2.19%
+model:LGT723D iter 3390: loss 2.8513, time 3072.47ms, mfu 2.26%
+------average encoder activity 0.487
+-----------average decoder density 0.2051
+step 3400: train loss 2.9591, val loss 2.9534
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3400: loss 2.9344, time 50091.41ms, mfu 2.05%
+model:LGT723D iter 3410: loss 2.9212, time 3278.74ms, mfu 2.12%
+model:LGT723D iter 3420: loss 3.1085, time 2937.28ms, mfu 2.21%
+model:LGT723D iter 3430: loss 3.0025, time 3595.55ms, mfu 2.23%
+model:LGT723D iter 3440: loss 3.0777, time 3517.89ms, mfu 2.26%
+------average encoder activity 0.492
+-----------average decoder density 0.2283
+step 3450: train loss 2.9582, val loss 2.9402
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3450: loss 3.1129, time 50691.47ms, mfu 2.05%
+model:LGT723D iter 3460: loss 2.9758, time 3583.85ms, mfu 2.09%
+model:LGT723D iter 3470: loss 2.8953, time 3206.64ms, mfu 2.16%
+model:LGT723D iter 3480: loss 2.9116, time 3300.19ms, mfu 2.21%
+model:LGT723D iter 3490: loss 3.1089, time 3443.94ms, mfu 2.25%
+------average encoder activity 0.497
+-----------average decoder density 0.1913
+step 3500: train loss 2.9367, val loss 2.9299
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3500: loss 2.8097, time 49803.19ms, mfu 2.04%
+model:LGT723D iter 3510: loss 2.8428, time 3659.48ms, mfu 2.08%
+model:LGT723D iter 3520: loss 2.8284, time 3647.01ms, mfu 2.11%
+model:LGT723D iter 3530: loss 2.7996, time 3099.98ms, mfu 2.19%
+model:LGT723D iter 3540: loss 2.7780, time 3631.25ms, mfu 2.21%
+------average encoder activity 0.504
+-----------average decoder density 0.1974
+step 3550: train loss 2.9447, val loss 2.9407
+model:LGT723D iter 3550: loss 3.1682, time 49008.78ms, mfu 2.01%
+model:LGT723D iter 3560: loss 3.1002, time 3132.07ms, mfu 2.09%
+model:LGT723D iter 3570: loss 2.4130, time 3636.49ms, mfu 2.12%
+model:LGT723D iter 3580: loss 2.9789, time 3637.76ms, mfu 2.16%
+model:LGT723D iter 3590: loss 2.8051, time 3059.11ms, mfu 2.23%
+------average encoder activity 0.511
+-----------average decoder density 0.2230
+step 3600: train loss 2.9292, val loss 2.9477
+model:LGT723D iter 3600: loss 3.1877, time 49327.04ms, mfu 2.02%
+model:LGT723D iter 3610: loss 2.7512, time 3664.50ms, mfu 2.06%
+model:LGT723D iter 3620: loss 2.9217, time 3061.97ms, mfu 2.15%
+model:LGT723D iter 3630: loss 2.4479, time 3645.25ms, mfu 2.17%
+model:LGT723D iter 3640: loss 2.9522, time 3638.11ms, mfu 2.20%
+------average encoder activity 0.519
+-----------average decoder density 0.2358
+step 3650: train loss 2.9485, val loss 2.9341
+model:LGT723D iter 3650: loss 2.7943, time 48668.88ms, mfu 2.00%
+model:LGT723D iter 3660: loss 3.1560, time 3200.89ms, mfu 2.07%
+model:LGT723D iter 3670: loss 3.0286, time 3278.72ms, mfu 2.14%
+model:LGT723D iter 3680: loss 2.9894, time 2895.58ms, mfu 2.23%
+model:LGT723D iter 3690: loss 2.8343, time 3483.23ms, mfu 2.26%
+------average encoder activity 0.526
+-----------average decoder density 0.2672
+step 3700: train loss 2.9543, val loss 2.9485
+model:LGT723D iter 3700: loss 3.2438, time 48696.13ms, mfu 2.05%
+model:LGT723D iter 3710: loss 2.9616, time 2864.80ms, mfu 2.16%
+model:LGT723D iter 3720: loss 3.0466, time 3190.30ms, mfu 2.22%
+model:LGT723D iter 3730: loss 2.9487, time 3070.34ms, mfu 2.28%
+model:LGT723D iter 3740: loss 2.4734, time 2636.75ms, mfu 2.39%
+------average encoder activity 0.530
+-----------average decoder density 0.2080
+step 3750: train loss 2.9232, val loss 2.9519
+model:LGT723D iter 3750: loss 3.0950, time 48534.83ms, mfu 2.17%
+model:LGT723D iter 3760: loss 2.8991, time 3419.47ms, mfu 2.21%
+model:LGT723D iter 3770: loss 2.8576, time 2898.12ms, mfu 2.30%
+model:LGT723D iter 3780: loss 3.0279, time 3196.96ms, mfu 2.34%
+model:LGT723D iter 3790: loss 2.7809, time 3003.50ms, mfu 2.40%
+------average encoder activity 0.536
+-----------average decoder density 0.2457
+step 3800: train loss 2.9238, val loss 2.9043
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 3800: loss 3.0176, time 50398.84ms, mfu 2.18%
+model:LGT723D iter 3810: loss 2.7178, time 3162.13ms, mfu 2.24%
+model:LGT723D iter 3820: loss 3.1233, time 2618.32ms, mfu 2.36%
+model:LGT723D iter 3830: loss 2.7790, time 3160.90ms, mfu 2.40%
+model:LGT723D iter 3840: loss 2.9349, time 3353.82ms, mfu 2.42%
+------average encoder activity 0.541
+-----------average decoder density 0.2384
+step 3850: train loss 2.9173, val loss 2.9289
+model:LGT723D iter 3850: loss 2.7848, time 48930.60ms, mfu 2.20%
+model:LGT723D iter 3860: loss 3.1742, time 3079.36ms, mfu 2.27%
+model:LGT723D iter 3870: loss 3.1295, time 3395.28ms, mfu 2.30%
+model:LGT723D iter 3880: loss 3.1227, time 3235.82ms, mfu 2.34%
+model:LGT723D iter 3890: loss 2.8517, time 2742.51ms, mfu 2.43%
+------average encoder activity 0.548
+-----------average decoder density 0.2452
+step 3900: train loss 2.9078, val loss 2.9166
+model:LGT723D iter 3900: loss 2.9654, time 47961.15ms, mfu 2.21%
+model:LGT723D iter 3910: loss 2.8986, time 3450.74ms, mfu 2.24%
+model:LGT723D iter 3920: loss 3.1483, time 3499.51ms, mfu 2.27%
+model:LGT723D iter 3930: loss 2.9430, time 3038.97ms, mfu 2.34%
+model:LGT723D iter 3940: loss 2.4492, time 3719.82ms, mfu 2.34%
+------average encoder activity 0.555
+-----------average decoder density 0.2050
+step 3950: train loss 2.9018, val loss 2.9321
+model:LGT723D iter 3950: loss 3.1543, time 48973.54ms, mfu 2.12%
+model:LGT723D iter 3960: loss 3.0066, time 2670.97ms, mfu 2.24%
+model:LGT723D iter 3970: loss 2.6690, time 3089.43ms, mfu 2.30%
+model:LGT723D iter 3980: loss 2.7738, time 3213.78ms, mfu 2.35%
+model:LGT723D iter 3990: loss 3.3059, time 2990.30ms, mfu 2.41%
+------average encoder activity 0.560
+-----------average decoder density 0.2208
+step 4000: train loss 2.9132, val loss 2.9356
+model:LGT723D iter 4000: loss 2.7930, time 48852.01ms, mfu 2.19%
+model:LGT723D iter 4010: loss 3.0139, time 3501.60ms, mfu 2.22%
+model:LGT723D iter 4020: loss 2.9482, time 3290.95ms, mfu 2.27%
+model:LGT723D iter 4030: loss 2.7875, time 2832.62ms, mfu 2.35%
+model:LGT723D iter 4040: loss 2.6278, time 3218.78ms, mfu 2.39%
+------average encoder activity 0.565
+-----------average decoder density 0.2575
+step 4050: train loss 2.9146, val loss 2.8832
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4050: loss 3.0836, time 49872.00ms, mfu 2.17%
+model:LGT723D iter 4060: loss 3.0293, time 3621.88ms, mfu 2.20%
+model:LGT723D iter 4070: loss 3.1234, time 2975.02ms, mfu 2.28%
+model:LGT723D iter 4080: loss 2.8600, time 3355.12ms, mfu 2.31%
+model:LGT723D iter 4090: loss 2.8377, time 3561.01ms, mfu 2.33%
+Overriding config with config/train_novel_char3.py:
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-novel-char3'
+eval_interval = 250 # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10 # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False # override via command line if you like
+wandb_project = 'novel'
+wandb_run_name = 'novel'
+
+dataset = 'novel_char3'
+gradient_accumulation_steps = 1
+# gradient_accumulation_steps = 6
+gradient_accumulation_steps = 12
+# batch_size = 12
+batch_size = 2
+# batch_size = 1
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 64 # context of up to 256 previous characters
+block_size = 1024 # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+# n_embd = 182
+dropout = 0.2
+
+# learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+learning_rate = 1e-4 # with baby networks can afford to go a bit higher
+
+# max_iters = 5000
+# lr_decay_iters = 5000 # make equal to max_iters usually
+
+max_iters = 500000
+lr_decay_iters = 500000 # make equal to max_iters usually
+
+min_lr = 1e-5 # learning_rate / 10 usually
+beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100 # not super necessary potentially
+
+# on macbook also add
+# device = 'cpu'  # run on cpu only
+# compile = False # do not torch compile the model
+# init_from ='resume'
+
+
+'''
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM251_4bfeb7b3e1b9c46a2542bb9406173e22 --model=CCM251
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM253_01b622029bb00e0dc9206cae3b0ab559 --model=CCM253 
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559 --model=CCM276
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM278_a97bfe077b316033e3604831d5ad371e --model=CCM278
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM305_52efa1def80492f81622f536ac701226 --model=CCM305
+
+
+out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559
+
+'''
+#### python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+Overriding: init_from = resume
+Overriding: compile = False
+Overriding: model = LGT723D
+Overriding: n_layer = 70
+Overriding: n_head = 12
+Overriding: share_layer = False
+Overriding: always_save_checkpoint = False
+Overriding: max_iters = 2500999
+Overriding: best_val_loss_force = 10.001
+Overriding: min_lr = 1e-05
+Overriding: dropout = 0.0
+Overriding: eval_interval = 50
+Overriding: force_resave = 0
+Overriding: random_seed = 3
+tokens per iteration will be: 24,576
+found vocab_size = 73440 (inside data/novel_char3/meta.pkl)
+out_dir: out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+Resuming training from out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+num decayed parameter tensors: 178, with 111,869,184 parameters
+num non-decayed parameter tensors: 109, with 20,671,873 parameters
+using fused AdamW: True
+------average encoder activity 0.565
+-----------average decoder density 0.2092
+step 4050: train loss 2.8974, val loss 2.9123
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4050: loss 3.0993, time 27540.66ms, mfu -100.00%
+model:LGT723D iter 4060: loss 2.8189, time 1707.40ms, mfu 5.18%
+model:LGT723D iter 4070: loss 2.7578, time 1707.44ms, mfu 5.18%
+model:LGT723D iter 4080: loss 3.1170, time 1708.78ms, mfu 5.18%
+model:LGT723D iter 4090: loss 2.8334, time 1707.92ms, mfu 5.18%
+------average encoder activity 0.571
+-----------average decoder density 0.2821
+step 4100: train loss 2.8862, val loss 2.8920
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4100: loss 2.6482, time 27479.93ms, mfu 4.69%
+model:LGT723D iter 4110: loss 2.8936, time 1706.28ms, mfu 4.74%
+model:LGT723D iter 4120: loss 2.8385, time 1707.12ms, mfu 4.79%
+model:LGT723D iter 4130: loss 2.8259, time 1707.09ms, mfu 4.83%
+model:LGT723D iter 4140: loss 2.9363, time 1706.30ms, mfu 4.86%
+------average encoder activity 0.576
+-----------average decoder density 0.2713
+step 4150: train loss 2.8822, val loss 2.9017
+model:LGT723D iter 4150: loss 2.7369, time 26184.74ms, mfu 4.41%
+model:LGT723D iter 4160: loss 2.7860, time 1709.63ms, mfu 4.49%
+model:LGT723D iter 4170: loss 2.7568, time 1708.44ms, mfu 4.55%
+model:LGT723D iter 4180: loss 2.9908, time 1709.05ms, mfu 4.62%
+model:LGT723D iter 4190: loss 2.8614, time 1709.97ms, mfu 4.67%
+------average encoder activity 0.583
+-----------average decoder density 0.2558
+step 4200: train loss 2.8851, val loss 2.8858
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4200: loss 2.6197, time 27463.00ms, mfu 4.24%
+model:LGT723D iter 4210: loss 2.3684, time 1706.03ms, mfu 4.33%
+model:LGT723D iter 4220: loss 2.8306, time 1709.56ms, mfu 4.42%
+model:LGT723D iter 4230: loss 2.8631, time 1706.42ms, mfu 4.49%
+model:LGT723D iter 4240: loss 2.8667, time 1706.14ms, mfu 4.56%
+------average encoder activity 0.589
+-----------average decoder density 0.2511
+model:LGT723D iter 4260: loss 2.7876, time 1704.52ms, mfu 4.24%
+model:LGT723D iter 4270: loss 2.7971, time 1705.90ms, mfu 4.34%
+model:LGT723D iter 4280: loss 2.6726, time 1705.76ms, mfu 4.42%
+model:LGT723D iter 4290: loss 2.9484, time 1708.26ms, mfu 4.50%
+------average encoder activity 0.596
+-----------average decoder density 0.2323
+step 4300: train loss 2.8788, val loss 2.8938
+model:LGT723D iter 4300: loss 2.7863, time 26143.04ms, mfu 4.08%
+model:LGT723D iter 4310: loss 2.8048, time 1710.55ms, mfu 4.19%
+model:LGT723D iter 4320: loss 2.8764, time 1715.14ms, mfu 4.29%
+model:LGT723D iter 4330: loss 2.9822, time 1709.49ms, mfu 4.38%
+model:LGT723D iter 4340: loss 2.9701, time 1710.08ms, mfu 4.46%
+------average encoder activity 0.602
+-----------average decoder density 0.2504
+step 4350: train loss 2.8563, val loss 2.8548
+saving checkpoint to out-novel-char3_LGT723D_3d25ede0cfd080d9e35756b051dcef65
+model:LGT723D iter 4350: loss 3.1915, time 27530.91ms, mfu 4.04%
+model:LGT723D iter 4360: loss 2.7444, time 1706.49ms, mfu 4.16%
+model:LGT723D iter 4370: loss 3.1305, time 1706.94ms, mfu 4.26%
+model:LGT723D iter 4380: loss 3.1941, time 1706.69ms, mfu 4.35%
+model:LGT723D iter 4390: loss 2.7164, time 1709.50ms, mfu 4.43%
+------average encoder activity 0.606
+-----------average decoder density 0.2936
+step 4400: train loss 2.8607, val loss 2.8636
+model:LGT723D iter 4400: loss 2.7269, time 26151.17ms, mfu 4.02%
+model:LGT723D iter 4410: loss 2.7769, time 1705.92ms, mfu 4.14%
+model:LGT723D iter 4420: loss 2.9753, time 1706.88ms, mfu 4.24%
+model:LGT723D iter 4430: loss 2.6747, time 1706.13ms, mfu 4.34%
+model:LGT723D iter 4440: loss 3.2195, time 1707.02ms, mfu 4.42%
+------average encoder activity 0.613
+-----------average decoder density 0.2642
+step 4450: train loss 2.8616, val loss 2.8808
+model:LGT723D iter 4450: loss 2.9546, time 26184.37ms, mfu 4.01%
+model:LGT723D iter 4460: loss 2.5770, time 1709.86ms, mfu 4.13%
+model:LGT723D iter 4470: loss 2.6537, time 1711.32ms, mfu 4.23%
+model:LGT723D iter 4480: loss 2.8313, time 1709.38ms, mfu 4.33%
+model:LGT723D iter 4490: loss 2.5559, time 1709.07ms, mfu 4.41%
+------average encoder activity 0.617
+-----------average decoder density 0.2432
+step 4500: train loss 2.8375, val loss 2.8998
+model:LGT723D iter 4500: loss 2.7735, time 26147.29ms, mfu 4.01%
+model:LGT723D iter 4510: loss 3.0394, time 1708.63ms, mfu 4.12%
+model:LGT723D iter 4520: loss 2.9347, time 1708.92ms, mfu 4.23%
+model:LGT723D iter 4530: loss 2.7933, time 1709.57ms, mfu 4.32%
+model:LGT723D iter 4540: loss 2.9564, time 1707.01ms, mfu 4.41%
+------average encoder activity 0.625
+-----------average decoder density 0.2779
+step 4550: train loss 2.8559, val loss 2.8696
+model:LGT723D iter 4550: loss 2.8180, time 26158.81ms, mfu 4.00%

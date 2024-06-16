@@ -25,7 +25,8 @@ for fn in glob.glob( os.path.join(os.path.dirname(__file__), '*.txt')):
                 data = buff.decode(encoding)
                 break
             except Exception as e:
-                print(e)            
+                print(e)
+                   
         if data is None:
             print(f'[error]{fn}')
         else:

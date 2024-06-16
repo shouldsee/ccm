@@ -73,6 +73,7 @@ lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 random_seed = 0
+force_resave = 0
 
 model = 'GPT'
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -122,8 +123,8 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint32, mode='r')
+val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint32, mode='r')
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -209,7 +210,7 @@ elif init_from.startswith('gpt2'):
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
-if int(best_val_loss_force)!=0:
+if (best_val_loss_force)!=0:
     best_val_loss = best_val_loss_force
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
@@ -230,6 +231,22 @@ if init_from == 'resume':
         print(traceback.format_exc())
         print('[ignore]skipping restoring optimizer')
         # optimizer.load_state_dict(checkpoint['optimizer'],strict=False)
+        if force_resave:
+
+            checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'model_args': model_args,
+                'iter_num': iter_num,
+                'best_val_loss': best_val_loss,
+                'config': config,
+            }
+            print(f"saving checkpoint to {out_dir}")
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+            print(f"done saving checkpoint to {out_dir}")
+
+            print('[DEBUG] FORCE RESAVING!!')
+        pass
 
 checkpoint = None # free up memory
 
@@ -244,7 +261,7 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
-@torch.no_grad()
+# @torch.no_grad()
 def estimate_loss():
     out = {}
     model.eval()
@@ -285,6 +302,7 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 while True:
+    model.set_iter_num(iter_num)
 
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
@@ -317,6 +335,7 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                print(f"done saving checkpoint to {out_dir}")
     if iter_num == 0 and eval_only:
         break
 

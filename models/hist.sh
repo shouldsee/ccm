@@ -1,0 +1,48 @@
+git lfs clone https://www.modelscope.cn/OpenBMB/MiniCPM-1B-sft-bf16.git
+# git lfs clone https://www.modelscope.cn/baicai003/llama-3-8b-Instruct-chinese_v2.git
+
+# llamafactory-cli train llama3_freeze_sft.yaml
+
+
+# ### model
+# model_name_or_path: ./models/llama-3-8b-Instruct-chinese_v2/
+
+
+
+# ### method
+# stage: sft
+# do_train: true
+# finetuning_type: freeze
+# freeze_trainable_layers: 1
+# freeze_trainable_modules: mlp
+# use_llama_pro: true
+
+# ### dataset
+# dataset: identity,alpaca_en_demo
+# template: llama3
+# cutoff_len: 1024
+# max_samples: 1000
+# overwrite_cache: true
+# preprocessing_num_workers: 16
+
+# ### output
+# output_dir: saves/llama3-8b-instruct-pro/freeze/sft
+# logging_steps: 10
+# save_steps: 500
+# plot_loss: true
+# overwrite_output_dir: true
+
+# ### train
+# per_device_train_batch_size: 1
+# gradient_accumulation_steps: 8
+# learning_rate: 0.0001
+# num_train_epochs: 3.0
+# lr_scheduler_type: cosine
+# warmup_steps: 0.1
+# fp16: true
+
+# ### eval
+# val_size: 0.1
+# per_device_eval_batch_size: 1
+# evaluation_strategy: steps
+# eval_steps: 10

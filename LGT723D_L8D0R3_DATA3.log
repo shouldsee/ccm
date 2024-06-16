@@ -1,0 +1,109 @@
+Overriding config with config/train_novel_char3.py:
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-novel-char3'
+eval_interval = 250 # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10 # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False # override via command line if you like
+wandb_project = 'novel'
+wandb_run_name = 'novel'
+
+dataset = 'novel_char3'
+gradient_accumulation_steps = 1
+# gradient_accumulation_steps = 6
+gradient_accumulation_steps = 12
+# batch_size = 12
+batch_size = 2
+# batch_size = 1
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 256 # context of up to 256 previous characters
+# block_size = 64 # context of up to 256 previous characters
+block_size = 1024 # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+# n_embd = 182
+dropout = 0.2
+
+# learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+learning_rate = 1e-4 # with baby networks can afford to go a bit higher
+
+# max_iters = 5000
+# lr_decay_iters = 5000 # make equal to max_iters usually
+
+max_iters = 500000
+lr_decay_iters = 500000 # make equal to max_iters usually
+
+min_lr = 1e-5 # learning_rate / 10 usually
+beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100 # not super necessary potentially
+
+# on macbook also add
+# device = 'cpu'  # run on cpu only
+# compile = False # do not torch compile the model
+# init_from ='resume'
+
+
+'''
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM251_4bfeb7b3e1b9c46a2542bb9406173e22 --model=CCM251
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM253_01b622029bb00e0dc9206cae3b0ab559 --model=CCM253 
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559 --model=CCM276
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM278_a97bfe077b316033e3604831d5ad371e --model=CCM278
+python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM305_52efa1def80492f81622f536ac701226 --model=CCM305
+
+
+out-novel-word_CCM276_01b622029bb00e0dc9206cae3b0ab559
+
+'''
+#### python3 -u sample.py config/train_novel.py --out_dir=out-novel-word_CCM232_c85667cd6eadbcf772d23fa97827c506 --model=CCM232
+Overriding: init_from = scratch
+Overriding: compile = False
+Overriding: model = LGT723D
+Overriding: n_layer = 8
+Overriding: n_head = 6
+Overriding: share_layer = False
+Overriding: always_save_checkpoint = False
+Overriding: max_iters = 2500999
+Overriding: best_val_loss_force = 10.001
+Overriding: min_lr = 1e-05
+Overriding: dropout = 0.0
+Overriding: eval_interval = 50
+Overriding: force_resave = 0
+Overriding: random_seed = 3
+tokens per iteration will be: 24,576
+found vocab_size = 73440 (inside data/novel_char3/meta.pkl)
+out_dir: out-novel-char3_LGT723D_a01a9ab74c736d0cbde64a3520ce5075
+Initializing a new model from scratch
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+num decayed parameter tensors: 23, with 38,635,776 parameters
+num non-decayed parameter tensors: 16, with 2,363,521 parameters
+using fused AdamW: True
+------average encoder activity 0.000
+-----------average decoder density 0.0000
+Traceback (most recent call last):
+  File "train.py", line 313, in <module>
+    losses = estimate_loss()
+  File "train.py", line 272, in estimate_loss
+    logits, loss = model(X, Y)
+  File "/root/miniconda3/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1501, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/ccm/model.py", line 51487, in forward
+    logits, lpy, vmsq = self._decode_with_prefix(
+  File "/root/ccm/model.py", line 51256, in _decode_with_prefix
+    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+  File "/root/miniconda3/lib/python3.8/site-packages/torch/nn/functional.py", line 3029, in cross_entropy
+    return torch._C._nn.cross_entropy_loss(input, target, weight, _Reduction.get_enum(reduction), ignore_index, label_smoothing)
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 290.00 MiB (GPU 0; 23.64 GiB total capacity; 2.85 GiB already allocated; 282.12 MiB free; 2.91 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF

@@ -63688,7 +63688,7 @@ class CCM206(GPT):
                 ) for _ in range(config.n_layer if not config.share_layer else 1) 
                 # ) for _ in range(1)
                 ]),
-            # h = nn.ModuleList([Block23(config) for _ in range(config.n_layer)]),
+        # h = nn.ModuleList([Block23(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
 

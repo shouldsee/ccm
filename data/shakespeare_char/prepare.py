@@ -25,7 +25,7 @@ chars = sorted(list(set(data)))
 vocab_size = len(chars)
 print("all the unique characters:", ''.join(chars))
 print(f"vocab size: {vocab_size:,}")
-
+ 
 # create a mapping from characters to integers
 stoi = { ch:i for i,ch in enumerate(chars) }
 itos = { i:ch for i,ch in enumerate(chars) }

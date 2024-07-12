@@ -99,22 +99,26 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, add_mlp=True):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        self.add_mlp = add_mlp
+        if add_mlp:
+            self.mlp = MLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        if self.add_mlp:
+            x = x + self.mlp(self.ln_2(x))
         return x
 
 
 def _lnorm(x):
     x = x/(0.001+x.std(-1,keepdim=True))
     return x
+import dataclasses
 @dataclass
 class GPTConfig:
     compile: bool
@@ -128,9 +132,13 @@ class GPTConfig:
     optimizer:   str  ='adamw'
     share_layer: bool = True
     random_seed:int =0
+    def asdict(self):
+        return dataclasses.asdict(self)
+
 
 from collections import OrderedDict
 from attrdict import AttrDict
+import threading
 
 class GPTProto(nn.Module):
     @property
@@ -140,6 +148,7 @@ class GPTProto(nn.Module):
         # self.config = config
         self._stats = AttrDict()
         self.iter_num = 100000
+        self.lock = threading.RLock()
 
     def set_iter_num(self,i):
         self.iter_num  = i
@@ -55685,7 +55694,7 @@ from transformers import AutoModel,AutoTokenizer,LlamaForCausalLM,AutoModelForCa
 
 
 
-class LGT800D(LGT718B):
+class LGT799D(LGT718B):
 
     '''
     loading LLAMA3 for encoding
@@ -57258,3 +57267,19131 @@ class LGT740F(LGT718B):
 
         return xz_int, xz
 
+
+
+
+
+
+
+
+class LGT740G(LGT740F):
+
+    '''
+    prior: tfm
+    latent: clipped xz
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 100
+        self.nm_a = config.nm_a = nm_a = nk
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(1)]),
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class Block800(nn.Module):
+
+    def __init__(self, config, hidden_dim,is_causal=True, is_attn=1, bias=None, use_mlp =True):
+        super().__init__()
+        self.nk = nk = config.nm_a
+        self.lrank = lrank  =config.lrank
+        
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        # self.lin = nn.Linear(config.n_embd, config.block_size//2 * config.nk * hidden_dimconfig.n_embd, bias=True)
+        self.lin_in = nn.Linear(config.n_embd, config.block_size//2 * config.nk * hidden_dim, bias=True)
+        self.lin_out = nn.Linear(hidden_dim, config.block_size//2 * config.nk * config.n_embd, bias=True)
+        self.lin_k = nn.Linear(config.n_embd, config.nk, bias=True)
+        # self.attn = CausalSelfAttention717(config, lora_vim, is_causal, bias)
+
+        self.dropout = nn.Dropout(config.dropout)
+        # self.is_attn=is_attn
+        # self.n_embd =  config.n_embd
+        # self.use_mlp=use_mlp
+
+
+
+    def forward(self, x, x0, vlora=None, vlora_att = None, attn_x = None, mlp_x= None,
+        mlp_mask=None,
+        return_dict=False,
+        return_mlp=False, 
+        return_gates=False):
+        pass
+        # ctx = self.attn(self.ln_1(x),self.ln_1(x0),)
+
+
+
+class LGT800(LGT718B):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 2
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block800(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        vk = block.lin_in(xinput).reshape(b,nk,t//2,-1)
+        vk2 = torch.einsum('bktf,ktfe->btke',vk, block.lin_out.weight.reshape( nk, t//2, -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,t//2,nk,ne)
+
+        xp = block.lin_k(xinput).reshape(b,nk).softmax(-1)
+
+        x2 = torch.einsum('bk,btke->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+    def lat_code_to_prefix(self, xint):
+        sep  = self.sep
+        low  = self.low
+        high = self.high
+
+        latent = (xint + 0.5) * sep + low 
+        # latent = ((xint + 0.5) * sep + low - latent).detach() + latent
+
+        self.print_once([latent.shape,sep,low,high])
+        xx = latent
+        # xx = torch.einsum('mke,bme->bmk',self.transformer.comp_out.weight.reshape( self.nm,self.config.n_embd,self.nm_a), latent)
+
+        return xx
+
+
+
+    def encode(self,idx,imax=-1):
+        # assert 0,'[TBC]'
+        b,t = idx.size()[:2]
+        nm = self.nm
+        device= idx.device
+        low =self.low
+        high = self.high
+        sep = self.sep
+        ns = 1
+
+        ### start encoding
+        lpe = 0.
+        # nm = 1
+        nm = self.nm//2
+
+        nseg = self.nseg
+        lseg = self.lseg
+        assert nseg  == 2,(t,lseg,nseg)
+        assert t%self.lseg==0, f"cannot split into segment ({t} // {self.lseg})"
+
+
+        pre_emb   = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae1)
+        xo = torch.zeros((ns*b,nseg*nm,self.config.n_embd),device=device)
+
+        idxcol = torch.ones((ns*b,nseg,nm),device=device).long()
+        idxx= torch.cat([
+            idx.reshape((ns*b,nseg,lseg)),
+            idxcol*(self.vmax-1),
+        ],2)
+        idxx = idxx.reshape(ns*b,-1)
+                
+        pos  = torch.arange(0,t+nseg*nm, dtype=torch.long, device=device)  # shape (t)
+        tok_emb = self.transformer.wte(idxx)     # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe2(pos)      # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        _disabled = self.is_change_encoder
+        if _disabled:
+            self.print_once('[dbg]changing encoder-----------------------')
+            pre_emb = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae2)
+        x = x[:,:lseg+nm]
+
+        blocks = self.transformer.h_enc
+        vmsq = 0.
+        for i,block in enumerate(blocks[:]):
+            x = block(x)
+
+        x = self.transformer.ln_f2(x)
+        x = x[:,-nm:]
+
+        # x = x.reshape((ns*b,nseg,lseg+nm,-1))
+        # x = x[:,:,-nm:]
+        # x = x.reshape(ns*b,nseg*nm,-1)
+        # x[:,nm+1:nm+nm]  = x[:,1:nm]
+
+        # self.print_once(f'------average encoder activity {vmsq.mean().item():.3f}')
+        # if self.encoder_lpe_scale>0.0:
+        #     ### lpe is maximised
+        #     ### vmsq is minimised
+        #     lpe = lpe  - self.encoder_lpe_scale*vmsq.sum(-1,keepdims=True)
+
+        ###
+        ### sample the prefix vector and  
+
+
+        ### truncating the output to desired dimension
+        ne     = self.config.n_embd
+        latent = x
+        latent_enc = latent.clip(low,high)
+
+
+        # latent = x
+        low  = self.low
+        high = self.high
+        sep  = self.sep
+
+        # lpe  = lpe  -5. * (latent - latent.clip(low,high)).square().sum(-1).sum(-1,keepdims=True)
+ 
+        xint = ((latent.clip(low, high-0.5*sep) - low )//sep)
+        # latent = ((xint + torch.rand_like(xint)) * sep + low - latent).detach() + latent
+        latent = ((xint + 0.5) * sep + low - latent).detach() + latent
+
+        prefix = latent
+        # self.print_once(torch.stack([prefix.max(), prefix.min()],0))
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+        return xint, latent[:,1:nm]        
+
+
+
+    def forward(self, idx, targets=None, return_raw_loss=False, mlp_mask = None, return_dict=False):
+        '''
+        the first token of index is masked to vmax-2
+        '''
+
+        if self.training:
+            self.reset = True
+
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        ns = 1
+        nm = self.nm
+        nm_a = self.nm_a
+        
+
+        if self.training:
+            self.reset = True
+
+        x       = idx
+        idx     = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        targets = targets.repeat((ns,1,1)).reshape((ns*b,t))
+
+
+        ### start encoding
+        lpe = 0.
+        # nm = 1
+        nm = self.nm//2
+
+        nseg = self.nseg
+        lseg = self.lseg
+        assert nseg  == 2,(t,lseg,nseg)
+        assert t%self.lseg==0, f"cannot split into segment ({t} // {self.lseg})"
+
+
+        pre_emb   = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae1)
+        xo = torch.zeros((ns*b,nseg*nm,self.config.n_embd),device=device)
+
+        idxcol = torch.ones((ns*b,nseg,nm),device=device).long()
+        idxx= torch.cat([
+            idx.reshape((ns*b,nseg,lseg)),
+            idxcol*(self.vmax-1),
+        ],2)
+        idxx = idxx.reshape(ns*b,-1)
+                
+        pos  = torch.arange(0,t+nseg*nm, dtype=torch.long, device=device)  # shape (t)
+        tok_emb = self.transformer.wte(idxx)     # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe2(pos)      # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        _disabled = self.is_change_encoder
+        if _disabled:
+            self.print_once('[dbg]changing encoder-----------------------')
+            pre_emb = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae2)
+        x = x[:,:lseg+nm]
+
+        blocks = self.transformer.h_enc
+        vmsq = 0.
+        for i,block in enumerate(blocks[:]):
+            x = block(x)
+            # , vlora=pre_emb, return_gates=True, )
+            # vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+            ### bte
+
+        x = self.transformer.ln_f2(x)
+        x = x[:,-nm:]
+
+        # x = x.reshape((ns*b,nseg,lseg+nm,-1))
+        # x = x[:,:,-nm:]
+        # x = x.reshape(ns*b,nseg*nm,-1)
+        # x[:,nm+1:nm+nm]  = x[:,1:nm]
+
+        # self.print_once(f'------average encoder activity {vmsq.mean().item():.3f}')
+        # if self.encoder_lpe_scale>0.0:
+        #     ### lpe is maximised
+        #     ### vmsq is minimised
+        #     lpe = lpe  - self.encoder_lpe_scale*vmsq.sum(-1,keepdims=True)
+
+        ###
+        ### sample the prefix vector and  
+
+
+        ### truncating the output to desired dimension
+        ne     = self.config.n_embd
+        latent = x
+        latent_enc = latent.clip(low,high)
+
+
+        ### restricting the hidden space
+        low  = self.low
+        high = self.high
+        sep  = self.sep
+        lpe  = lpe  -5. * (latent - latent.clip(low,high)).square().sum(-1).sum(-1,keepdims=True)
+        xint = ((latent.clip(low, high-0.5*sep) - low )//sep)
+        # latent = ((xint + torch.rand_like(xint)) * sep + low - latent).detach() + latent
+        latent = ((xint + 0.5) * sep + low - latent).detach() + latent
+
+        prefix = latent
+        # self.print_once(torch.stack([prefix.max(), prefix.min()],0))
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+
+        _disabled = self._disabled
+        # _disabled = 1;  
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the latent!!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))
+        
+        logits, lpy, vmsq = self._decode_with_prefix(
+            self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0, mlp_mask=mlp_mask)
+        lpy0 = lpy
+        # lpya = lpy[:,:,:t//2].sum(-1,keepdims=True)*0
+        # lpya = lpy[:,:,:].sum(-1,keepdims=True)
+        lpy  = lpy[:,:,t//2:].sum(-1,keepdims=True)
+
+
+        # lpe = torch.zeros_like(x).sum(-1).sum(-1,keepdims=True)
+        if self.lpe_scale>0.0:
+            ### lpe is maximised
+            ### vmsq is minimised
+            lpe = lpe  - self.lpe_scale*vmsq.sum(-1,keepdims=True)
+
+        ### decoder loss
+        _disabled = self._disabled
+        if _disabled==2:
+            pass
+            # self.print_once('[debug]disable prior')
+        else:
+            lpy = lpy - math.log(self.nsep)*nm*nm_a - self.extra_loss
+
+
+        if return_dict:
+            return AttrDict(
+                raw_loss=  -lpy/t,
+                logits = logits,
+                latent_vec = latent_enc,
+                latent_int = latent,
+            )
+
+        ### adding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+        if not self.training:
+            loss = (lpy)/1
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = (lpy1+lpy2)/2 
+            loss = lpy
+            loss = -(loss.mean() + lpe.mean())/ t
+
+        if self.reset and not self.training:
+            self.reset = False
+
+        return logits, loss      
+
+    def post_encode_before_pca(self,xz_int, xz ):
+        if 0:
+            xd = xz.unsqueeze(-1) - self.kavg.weight[None,None]
+            # xk = self.kin(x).reshape(ns*b,self.nm, self.nk, -1)
+            msq2 = (xd).square().mean(2)
+            _, idxk = msq2.min(dim=-1)
+            idxq = 69
+            idxq = 84
+            idxq = 29
+            # self.print_once(idxk.shape)
+            sel = (idxk[:,0]==idxq)
+            xz_int = xz_int[sel]
+            xz = xz[sel]
+
+        return xz_int, xz
+
+
+
+
+
+
+
+class LGT800A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 50
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block800(config, hidden_dim=10)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+
+
+
+
+class LGT800B(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 100
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block800(config, hidden_dim=10)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+
+
+
+
+class Block801(nn.Module):
+
+    def __init__(self, config,):
+        super().__init__()
+        self.rnn = nn.GRU(config.n_embd,config.n_embd,batch_first=True)
+        
+
+
+
+    def forward(self, x, x0, vlora=None, vlora_att = None, attn_x = None, mlp_x= None,
+        mlp_mask=None,
+        return_dict=False,
+        return_mlp=False, 
+        return_gates=False):
+        pass
+        # ctx = self.attn(self.ln_1(x),self.ln_1(x0),)
+
+
+
+class LGT801(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 2
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k  = nn.Linear(config.n_embd, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,h0)
+            out[i] = v[:,1:]
+            pass
+
+
+        xp = self.transformer.lin_k(xinput[:,:1]).reshape(b,nk).softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT801A(LGT801):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k  = nn.Linear(config.n_embd, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT802A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k  = nn.Linear(config.n_embd, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,h0)
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,0:1]+ pos_emb[None,3:4,:]
+        xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1]).reshape(b,nk).softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT803A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k  = nn.Linear(config.n_embd, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,h0)
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,0:1]+ pos_emb[None,3:4,:]
+        xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1]).reshape(b,nk).softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+class LGT804A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,h0)
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,0:1]+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1]).reshape(b,nk,-1)
+        xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+        xp = 0.1*xp
+        # xp = xp.masked_fill(xp<xp.topk(3,-1)[0].min(-1)[0],float('-inf'))
+        xp = xp.softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+class LGT805A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,h0)
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,0:1]+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1]).reshape(b,nk,-1)
+        xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+        xp = 0.1*xp
+        # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+class LGT807A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,0:1].detach()+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,h0)
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,0:1].detach()+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1]).reshape(b,nk,-1)
+        xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+        xp = 0.1*xp
+        xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT808A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        # self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask),
+            # + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,1:2], vlora_att=prefix1[:,i:1:2], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,2:3,:]#+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        # h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,xinput[:,:1].transpose(1,0))
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,3:4,:]#+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1,:]).reshape(b,nk,-1)
+        # xp = xp[:,:,0]
+        xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+
+        # xp = 0.1*xp
+        # # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        # xp = xp*xp.sigmoid()
+        # xp = xp.sigmoid()
+        xp = xp*0.01
+        xp = xp.softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT810A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        # self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask),
+            # + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,1:2], vlora_att=prefix1[:,i:1:2], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,2:3,:]#+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        # h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,xinput[:,:1].transpose(1,0))
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,3:4,:]#+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1,:]).reshape(b,nk,-1)
+        # xp = xp[:,:,0]
+        xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+
+        # xp = 0.1*xp
+        # # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        # xp = xp*xp.sigmoid()
+        xp = xp.sigmoid()
+        # xp = xp*0.01
+        # xp = xp.softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT810C(LGT810A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        # self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 2
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT811A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        # self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask),
+            # + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,1:2], vlora_att=prefix1[:,i:1:2], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,2:3,:]#+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        # h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,xinput[:,:1].transpose(1,0))
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,3:4,:]#.detach()#+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1,:]).reshape(b,nk,-1)
+        # xp = xp[:,:,0]
+        xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+
+        # xp = 0.1*xp
+        # # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        # xp = xp*xp.sigmoid()
+        # xp = xp.sigmoid()
+        # xp = xp*0.01
+        xp = xp.softmax(-1)
+        # xp = xp.clip(0,0.5)
+        # xp = xp/xp.sum(-1,keepdims=True)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT812A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        # self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask),
+            # + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,1:2], vlora_att=prefix1[:,i:1:2], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,2:3,:]#+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        # h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,xinput[:,:1].transpose(1,0))
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,3:4,:]#+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1,:]).reshape(b,nk,-1)
+        xp = xp[:,:,0]
+        # xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+
+        # xp = 0.1*xp
+        # # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        # xp = xp*xp.sigmoid()
+        xp = xp.sigmoid()
+        vmsq = 0.01*xp
+        # xp = xp*0.01
+        # xp = xp.softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT813A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        self.nm = config.nm = nm = 12
+        # self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask),
+            # + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,1:2], vlora_att=prefix1[:,i:1:2], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,2:3,:]#+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        # h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,xinput[:,:1].transpose(1,0))
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,3:4,:]#+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.ln_f2(xinput)
+        xp = self.transformer.lin_k(xp).reshape(b,nk,-1)
+        xp = xp[:,:,0]
+        # xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+
+        # xp = 0.1*xp
+        # # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        # xp = xp*xp.sigmoid()
+
+        # xp = xp.sigmoid()
+        
+        # vmsq = 0.01*xp
+        xp = xp*0.01
+        xp = xp.softmax(-1)
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+class LGT809A(LGT800):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 20
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        v_hidden = 5
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte  = nn.Embedding(vmax, config.n_embd),
+            wpe  = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop   = nn.Dropout(config.dropout),
+            h_dec  = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block801(config)]),
+            lin_k     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            lin_k2     = nn.Linear(1, config.nk, bias=True),
+            lin_kout     = nn.Linear(config.n_embd, config.nk*v_hidden, bias=True),
+            # lin_kout  = nn.Linear(v_hidden, config.nk, bias=True),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+        
+        vk2 = out = torch.zeros((nk, b, t//2, ne) ,device=device)
+        xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        # h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,xinput[:,:1].transpose(1,0))
+            out[i] = v[:,1:]
+            pass
+
+
+        xinput = prefix[:,0:1]+ pos_emb[None,3:4,:]
+        # xinput = 0.1*xinput
+        xp = self.transformer.lin_k(xinput[:,:1]).reshape(b,nk,-1)
+        # xp = xp[:,:,0]
+        xp = torch.einsum('bkf,bkf->bk',xp, self.transformer.lin_kout(xinput[:,:1]).reshape(b,nk,-1))
+
+        # xp = 0.1*xp
+        # # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        # xp = xp*xp.sigmoid()
+        # xp = xp+self.transformer.lin_kout.
+        xp = (xp+self.transformer.lin_k2.bias.reshape(1,nk)).sigmoid()
+        # xp = (0.1*xp+self.transformer.lin_k2.bias.reshape(1,nk)).softmax(-1)
+        # .sigmoid()
+        # xp = nn.GELU()(xp)
+        # .relu()
+
+        x2 = torch.einsum('bk,kbte->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT850A(LGT718B):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block800(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix[:,1:2]
+        vk = block.lin_in(xinput).reshape(b,nk,t//2,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('bktf,ktfe->btke',vk, block.lin_out.weight.reshape( nk, t//2, -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,t//2,nk,ne)
+
+        xp = block.lin_k(xinput).reshape(b,nk)
+        xp = xp.softmax(-1)
+        
+        x2 = torch.einsum('bk,btke->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+    def lat_code_to_prefix(self, xint):
+        sep  = self.sep
+        low  = self.low
+        high = self.high
+
+        latent = (xint + 0.5) * sep + low 
+        # latent = ((xint + 0.5) * sep + low - latent).detach() + latent
+
+        self.print_once([latent.shape,sep,low,high])
+        xx = latent
+        # xx = torch.einsum('mke,bme->bmk',self.transformer.comp_out.weight.reshape( self.nm,self.config.n_embd,self.nm_a), latent)
+
+        return xx
+
+
+
+    def encode(self,idx,imax=-1):
+        # assert 0,'[TBC]'
+        b,t = idx.size()[:2]
+        nm = self.nm
+        device= idx.device
+        low =self.low
+        high = self.high
+        sep = self.sep
+        ns = 1
+
+        ### start encoding
+        lpe = 0.
+        # nm = 1
+        nm = self.nm//2
+
+        nseg = self.nseg
+        lseg = self.lseg
+        assert nseg  == 2,(t,lseg,nseg)
+        assert t%self.lseg==0, f"cannot split into segment ({t} // {self.lseg})"
+
+
+        pre_emb   = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae1)
+        xo = torch.zeros((ns*b,nseg*nm,self.config.n_embd),device=device)
+
+        idxcol = torch.ones((ns*b,nseg,nm),device=device).long()
+        idxx= torch.cat([
+            idx.reshape((ns*b,nseg,lseg)),
+            idxcol*(self.vmax-1),
+        ],2)
+        idxx = idxx.reshape(ns*b,-1)
+                
+        pos  = torch.arange(0,t+nseg*nm, dtype=torch.long, device=device)  # shape (t)
+        tok_emb = self.transformer.wte(idxx)     # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe2(pos)      # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        _disabled = self.is_change_encoder
+        if _disabled:
+            self.print_once('[dbg]changing encoder-----------------------')
+            pre_emb = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae2)
+        x = x[:,:lseg+nm]
+
+        blocks = self.transformer.h_enc
+        vmsq = 0.
+        for i,block in enumerate(blocks[:]):
+            x = block(x)
+
+        x = self.transformer.ln_f2(x)
+        x = x[:,-nm:]
+
+
+        ###
+        ### sample the prefix vector and  
+
+
+        ### truncating the output to desired dimension
+        ne     = self.config.n_embd
+        latent = x
+        latent_enc = latent.clip(low,high)
+
+
+        # latent = x
+        low  = self.low
+        high = self.high
+        sep  = self.sep
+
+        # lpe  = lpe  -5. * (latent - latent.clip(low,high)).square().sum(-1).sum(-1,keepdims=True)
+ 
+        xint = ((latent.clip(low, high-0.5*sep) - low )//sep)
+        # latent = ((xint + torch.rand_like(xint)) * sep + low - latent).detach() + latent
+        latent = ((xint + 0.5) * sep + low - latent).detach() + latent
+
+        prefix = latent
+        # self.print_once(torch.stack([prefix.max(), prefix.min()],0))
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+        return xint, latent[:,1:nm]        
+
+
+
+    def forward(self, idx, targets=None, return_raw_loss=False, mlp_mask = None, return_dict=False):
+        '''
+        the first token of index is masked to vmax-2
+        '''
+
+        if self.training:
+            self.reset = True
+
+
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        low = self.low
+        high = self.high
+        nsep = self.nsep
+        sep = self.sep
+
+        ns = self.ns
+        ns = 1
+        nm = self.nm
+        nm_a = self.nm_a
+        
+
+        if self.training:
+            self.reset = True
+
+        x       = idx
+        idx     = idx.repeat((ns,1,1)).reshape((ns*b,t))
+        targets = targets.repeat((ns,1,1)).reshape((ns*b,t))
+
+
+        ### start encoding
+        lpe = 0.
+        # nm = 1
+        nm = self.nm//2
+
+        nseg = self.nseg
+        lseg = self.lseg
+        assert nseg  == 2,(t,lseg,nseg)
+        assert t%self.lseg==0, f"cannot split into segment ({t} // {self.lseg})"
+
+
+        pre_emb   = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae1)
+        xo = torch.zeros((ns*b,nseg*nm,self.config.n_embd),device=device)
+
+        idxcol = torch.ones((ns*b,nseg,nm),device=device).long()
+        idxx= torch.cat([
+            idx.reshape((ns*b,nseg,lseg)),
+            idxcol*(self.vmax-1),
+        ],2)
+        idxx = idxx.reshape(ns*b,-1)
+                
+        pos  = torch.arange(0,t+nseg*nm, dtype=torch.long, device=device)  # shape (t)
+        tok_emb = self.transformer.wte(idxx)     # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe2(pos)      # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        _disabled = self.is_change_encoder
+        if _disabled:
+            self.print_once('[dbg]changing encoder-----------------------')
+            pre_emb = self.transformer.wte(torch.ones_like(idx[:,:1])*self.token_ae2)
+        x = x[:,:lseg+nm]
+
+        blocks = self.transformer.h_enc
+        vmsq = 0.
+        for i,block in enumerate(blocks[:]):
+            x = block(x)
+            # , vlora=pre_emb, return_gates=True, )
+            # vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+            ### bte
+
+        x = self.transformer.ln_f2(x)
+        x = x[:,-nm:]
+
+        # x = x.reshape((ns*b,nseg,lseg+nm,-1))
+        # x = x[:,:,-nm:]
+        # x = x.reshape(ns*b,nseg*nm,-1)
+        # x[:,nm+1:nm+nm]  = x[:,1:nm]
+
+        # self.print_once(f'------average encoder activity {vmsq.mean().item():.3f}')
+        # if self.encoder_lpe_scale>0.0:
+        #     ### lpe is maximised
+        #     ### vmsq is minimised
+        #     lpe = lpe  - self.encoder_lpe_scale*vmsq.sum(-1,keepdims=True)
+
+        ###
+        ### sample the prefix vector and  
+
+
+        ### truncating the output to desired dimension
+        ne     = self.config.n_embd
+        latent = x
+        latent_enc = latent.clip(low,high)
+
+
+        ### restricting the hidden space
+        low  = self.low
+        high = self.high
+        sep  = self.sep
+        lpe  = lpe  -5. * (latent - latent.clip(low,high)).square().sum(-1).sum(-1,keepdims=True)
+        xint = ((latent.clip(low, high-0.5*sep) - low )//sep)
+        # latent = ((xint + torch.rand_like(xint)) * sep + low - latent).detach() + latent
+        latent = ((xint + 0.5) * sep + low - latent).detach() + latent
+
+        prefix = latent
+        # self.print_once(torch.stack([prefix.max(), prefix.min()],0))
+
+        ### resampled representation q( z|d )
+        ### STE estimator
+
+        _disabled = self._disabled
+        # _disabled = 1;  
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the latent!!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))
+        
+        logits, lpy, vmsq = self._decode_with_prefix(
+            self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0, mlp_mask=mlp_mask)
+        lpy0 = lpy
+        # lpya = lpy[:,:,:t//2].sum(-1,keepdims=True)*0
+        # lpya = lpy[:,:,:].sum(-1,keepdims=True)
+        lpy  = lpy[:,:,t//2:].sum(-1,keepdims=True)
+
+
+        # lpe = torch.zeros_like(x).sum(-1).sum(-1,keepdims=True)
+        if self.lpe_scale>0.0:
+            ### lpe is maximised
+            ### vmsq is minimised
+            lpe = lpe  - self.lpe_scale*vmsq.sum(-1,keepdims=True)
+
+        ### decoder loss
+        _disabled = self._disabled
+        if _disabled==2:
+            pass
+            # self.print_once('[debug]disable prior')
+        else:
+            lpy = lpy - math.log(self.nsep)*nm*nm_a - self.extra_loss
+
+
+        if return_dict:
+            return AttrDict(
+                raw_loss=  -lpy/t,
+                logits = logits,
+                latent_vec = latent_enc,
+                latent_int = latent,
+            )
+
+        ### adding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+        if not self.training:
+            loss = (lpy)/1
+            loss = -loss.mean() / t
+        else:            
+            ### decoder loss + encoder loss
+            # loss = (lpy1+lpy2)/2 
+            loss = lpy
+            loss = -(loss.mean() + lpe.mean())/ t
+
+        if self.reset and not self.training:
+            self.reset = False
+
+        return logits, loss      
+
+    def post_encode_before_pca(self,xz_int, xz ):
+        if 0:
+            xd = xz.unsqueeze(-1) - self.kavg.weight[None,None]
+            # xk = self.kin(x).reshape(ns*b,self.nm, self.nk, -1)
+            msq2 = (xd).square().mean(2)
+            _, idxk = msq2.min(dim=-1)
+            idxq = 69
+            idxq = 84
+            idxq = 29
+            # self.print_once(idxk.shape)
+            sel = (idxk[:,0]==idxq)
+            xz_int = xz_int[sel]
+            xz = xz[sel]
+
+        return xz_int, xz
+
+
+
+
+
+
+
+
+
+class LGT851A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block800(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix[:,0:1].detach()+ pos_emb[None,2:3,:]
+        vk = block.lin_in(xinput).reshape(b,nk,t//2,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('bktf,ktfe->btke',vk, block.lin_out.weight.reshape( nk, t//2, -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,t//2,nk,ne)
+
+        xp = block.lin_k(xinput).reshape(b,nk)
+
+        xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        xp = xp.softmax(-1)
+        
+        x2 = torch.einsum('bk,btke->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT852A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block800(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix[:,0:1].detach()+ pos_emb[None,2:3,:]
+        vk = block.lin_in(xinput).reshape(b,nk,t//2,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('bktf,ktfe->btke',vk, block.lin_out.weight.reshape( nk, t//2, -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,t//2,nk,ne)
+
+        xp = block.lin_k(xinput).reshape(b,nk)
+
+        # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+
+        xp = xp.sigmoid()
+        
+        x2 = torch.einsum('bk,btke->bte',xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class Block853(nn.Module):
+
+    def __init__(self, config, hidden_dim,is_causal=True, is_attn=1, bias=None, use_mlp =True):
+        super().__init__()
+        self.nk = nk = config.nm_a
+        self.lrank = lrank  =config.lrank
+        
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        # self.lin = nn.Linear(config.n_embd, config.block_size//2 * config.nk * hidden_dimconfig.n_embd, bias=True)
+        self.lin_in = nn.Linear(config.n_embd, config.nk * hidden_dim, bias=True)
+        self.lin_out = nn.Linear(hidden_dim, config.nk * config.n_embd, bias=True)
+        self.lin_k = nn.Linear(config.n_embd, config.nk, bias=True)
+        # self.attn = CausalSelfAttention717(config, lora_vim, is_causal, bias)
+
+        self.dropout = nn.Dropout(config.dropout)
+        # self.is_attn=is_attn
+        # self.n_embd =  config.n_embd
+        # self.use_mlp=use_mlp
+
+
+
+    def forward(self, x, x0, vlora=None, vlora_att = None, attn_x = None, mlp_x= None,
+        mlp_mask=None,
+        return_dict=False,
+        return_mlp=False, 
+        return_gates=False):
+        pass
+        # ctx = self.attn(self.ln_1(x),self.ln_1(x0),)
+
+
+class LGT853A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix[:,1:2]
+
+        vk = block.lin_in(x0[:,lseg:]).reshape(b,t//2,nk,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('btkf,kfe->btke',vk, block.lin_out.weight.reshape( nk,  -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,1,nk,ne)
+
+        xmix = xinput[:,:1] 
+        # xmix = self.transformer.ln_f2(xmix)
+        xp = block.lin_k(xmix).reshape(b,nk)
+
+        # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+        # xp = xp.sigmoid()
+        xp = 0.01*xp
+
+        xp = xp.softmax(-1)
+        
+        x2 = torch.einsum('bk,btke->bte', xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT854A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix[:,1:2]
+
+        vk = block.lin_in(x0[:,lseg:]).reshape(b,t//2,nk,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('btkf,kfe->btke',vk, block.lin_out.weight.reshape( nk,  -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,1,nk,ne)
+
+        xmix = xinput[:,:1] 
+        xmix = self.transformer.ln_f2(xmix)
+        xmix = 0.1*xmix
+        xp = block.lin_k(xmix).reshape(b,nk)
+
+        # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+        # xp = xp.sigmoid()
+        # xp = 0.01*xp
+
+        xp = xp.softmax(-1)
+        
+        x2 = torch.einsum('bk,btke->bte', xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT854C(LGT854A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 2
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+
+
+class LGT855A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix1[:,0:1]
+
+        vk = block.lin_in(x0[:,lseg:]).reshape(b,t//2,nk,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('btkf,kfe->btke',vk, block.lin_out.weight.reshape( nk,  -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,1,nk,ne)
+
+        xmix = xinput[:,:1] 
+        xmix = self.transformer.ln_f2(xmix)
+        xmix = 0.1*xmix
+        xp = block.lin_k(xmix).reshape(b,nk)
+        xp = xp*xp.sigmoid()
+
+        # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+        # xp = xp.sigmoid()
+        # xp = 0.01*xp
+
+        # xp = xp.softmax(-1)
+        
+        x2 = torch.einsum('bk,btke->bte', xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT860A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = torch.ones_like(prefix1[:,0:1])
+
+        vk = block.lin_in(x0[:,lseg:]).reshape(b,t//2,nk,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('btkf,kfe->btke',vk, block.lin_out.weight.reshape( nk,  -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,1,nk,ne)
+
+        xmix = xinput[:,:1] 
+        xmix = self.transformer.ln_f2(xmix)
+        xmix = 0.1*xmix
+        xp = block.lin_k(xmix).reshape(b,nk)
+        xp = xp*xp.sigmoid()
+
+
+
+        # xp = xp.softmax(-1)
+        
+        x2 = torch.einsum('bk,btke->bte', xp, vk2)
+        #### disabling the auxiliary
+        # x = x2
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT861A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_forward = nn.Linear(config.n_embd, config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        # xinput = torch.ones_like(prefix1[:,0:1])
+        xinput = (prefix1[:,0:1])
+
+        vk = block.lin_in(x0[:,lseg:]).reshape(b,t//2,nk,-1)
+        vk = vk*vk.sigmoid()
+        vk = torch.einsum('btkf,kfe->btke',vk, block.lin_out.weight.reshape( nk,  -1, ne))
+        
+        vk2 = vk + block.lin_out.bias.reshape(1,1,nk,ne)
+
+        xmix = xinput[:,:1] 
+        xmix = self.transformer.ln_f2(xmix)
+        xmix = xmix
+        xp = block.lin_k(xmix).reshape(b,nk)
+        xp = xp*xp.sigmoid()
+        
+        
+
+        x2 = torch.einsum('bk,btke->bte', xp, vk2)
+        x3 = self.transformer.h_forward(x0[:,lseg:])
+        
+        xg = self.transformer.h_gate(x0[:,lseg:]).matmul(prefix1[:,0:1].transpose(1,2))[:,:,0:1].sigmoid()
+        self.print_once((xg*100).mean((0,1)).long().cpu().numpy())
+
+        #### disabling the auxiliary
+        # x = x2
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(xg*x2+ (1-xg)*x3)
+
+        # self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT862A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        
+        xg = torch.einsum('btke,bte->btk',self.transformer.h_gate(x0[:,lseg:]).reshape(b,lseg,nk,ne), prefix1[:,0:1])
+        xg = xg.softmax(-1)
+        xv = self.transformer.h_f1(prefix1[:,1:2]) + self.transformer.h_f2(x0[:,lseg:])
+        xv = xv.reshape(b,lseg,nk,ne)
+        x2 = torch.einsum('btk,btke->bte',xg,xv)
+        # .matmul(prefix1[:,0:1].transpose(1,2))[:,:,0:1].sigmoid()
+        self.print_once((xg*100).mean((0,1)).long().cpu().numpy())
+
+        #### disabling the auxiliary
+        # x = x2
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+        
+        # self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT863A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        xtok = tok_emb
+        
+        xg = torch.einsum('btke,bte->btk',self.transformer.h_gate(xtok[:,lseg:]).reshape(b,lseg,nk,ne), prefix1[:,0:1])
+        xg = xg*self.scale_gate
+        xg = xg.softmax(-1)
+        xv = self.transformer.h_f1(prefix1[:,1:2]) + self.transformer.h_f2(xtok[:,lseg:])
+        xv = xv.reshape(b,lseg,nk,ne)
+        x2 = torch.einsum('btk,btke->bte',xg,xv)
+        # .matmul(prefix1[:,0:1].transpose(1,2))[:,:,0:1].sigmoid()
+        self.print_once((xg*100).mean((0,1)).long().cpu().numpy())
+
+        #### disabling the auxiliary
+        # x = x2
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+
+class LGT870A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            prefix[:,1:2],
+            xtok[:,lseg:],
+        ],1)
+
+        for i,block in enumerate(self.transformer.h_dec2):
+            x= block(x)
+        x2 = x[:,1:]
+
+
+        #### disabling the auxiliary
+        # x = x2
+
+        xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class CausalSelfAttention871(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # regularization
+
+        # self.dropout = nn.Dropout(config.dropout)
+        # _dclass = _Dropout42B
+        _dclass = nn.Dropout
+
+        self.attn_dropout  = _dclass(config.dropout)
+        self.resid_dropout = _dclass(config.dropout)
+        
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = False
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+
+    def forward(self, x, x0):
+        B, T,  C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        _, T2, _= x0.size()
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, _, _  = self.c_attn(x).split(self.n_embd, dim=2)
+        _, k, v  = self.c_attn(x0).split(self.n_embd, dim=2)
+        k = k.view(B, T2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T,  self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        if self.flash:
+            assert 0
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            # manual implementation of attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:,:,:T,:T2] == 0, float('-inf'))
+
+            # att  = att.transpose(1,2)
+            # _att  = att.reshape((B,T,-1))
+            # # eng = _att.logsumexp(-1)
+            # att = _att.softmax(-1).reshape(att.shape)
+            # att  = att.transpose(1,2)
+
+            # att = F.softmax(att, dim=-1)
+            att = att.sigmoid()
+            att = self.attn_dropout(att)
+            
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
+
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu    = nn.GELU()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class Block871(nn.Module):
+
+    def __init__(self, config, add_mlp=True):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention871(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.add_mlp = add_mlp
+        if add_mlp:
+            self.mlp = MLP(config)
+
+    def forward(self, x, x0):
+        x = x + self.attn(self.ln_1(x),self.ln_1(x0))
+        if self.add_mlp:
+            x = x + self.mlp(self.ln_2(x))
+        return x
+
+
+
+class CausalSelfAttention875(nn.Module):
+
+    def __init__(self, config, n_head=0):
+        super().__init__()
+        if n_head==0:
+            n_head=config.n_head
+        assert config.n_embd % n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # regularization
+
+        # self.dropout = nn.Dropout(config.dropout)
+        # _dclass = _Dropout42B
+        _dclass = nn.Dropout
+
+        self.attn_dropout  = _dclass(config.dropout)
+        self.resid_dropout = _dclass(config.dropout)
+        
+        self.n_head = n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = False
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+
+    def forward(self, x, x0):
+        B, T,  C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        _, T2, _= x0.size()
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, _  = self.c_attn(x).split(self.n_embd, dim=2)
+        _, _, v  = self.c_attn(x0).split(self.n_embd, dim=2)
+        k = k.view(B, T2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T,  self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        if self.flash:
+            assert 0
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            # manual implementation of attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:,:,:T,:T2] == 0, float('-inf'))
+
+
+            # att = F.softmax(att, dim=-1)
+            att = att.sigmoid()
+            att = self.attn_dropout(att)
+            
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
+
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu    = nn.GELU()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class Block875(nn.Module):
+
+    def __init__(self, config, n_head=0, add_mlp=True):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention875(config, n_head)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.add_mlp = add_mlp
+        if add_mlp:
+            self.mlp = MLP(config)
+
+    def forward(self, x, x0):
+        x = x + self.attn(self.ln_1(x),self.ln_1(x0))
+        if self.add_mlp:
+            x = x + self.mlp(self.ln_2(x))
+        return x
+
+
+
+class LGT871A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block871(config) for _ in range(config.n_layer//4)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        # x = torch.cat([
+        #     prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+        #     x[:,lseg:],
+        # ],1)
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,lseg:],
+        ],1)
+
+        for i,block in enumerate(self.transformer.h_dec2):
+            x= block(x,prefix[:,1:2])
+        x2 = x[:,0:]
+
+
+        #### disabling the auxiliary
+        # x = x2
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT871B(LGT871A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block871(config) for _ in range(config.n_layer//4)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(1)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+class LGT872A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//4+3)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block871(config) for _ in range(config.n_layer//4)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        # x = torch.cat([
+        #     prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+        #     x[:,lseg:],
+        # ],1)
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,lseg:],
+        ],1)
+
+        for i,block in enumerate(self.transformer.h_dec2):
+            x= block(x,prefix[:,1+i:2+i])
+        x2 = x[:,0:]
+
+
+        #### disabling the auxiliary
+        # x = x2
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT873A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//4+3)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            # h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            h_dec2 = nn.ModuleList([Block871(config) for _ in range(config.n_layer//4)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        x = torch.cat([
+            prefix[:,0:1],
+            x[:,lseg:],
+        ],1)
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+        for i,block in enumerate(self.transformer.h_dec):
+            x= block(x)
+        x1 = x[:,1:]
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,lseg:],
+        ],1)
+
+        for i,block in enumerate(self.transformer.h_dec2):
+            x= block(x,prefix[:,1+i:2+i])
+        x2 = x[:,0:]
+
+
+        #### disabling the auxiliary
+        # x = x2
+
+        xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        # xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+
+
+
+
+
+class LGT874A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block871(config,add_mlp=False) for _ in range(1)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        for i,block in enumerate(self.transformer.h_dec2):
+            # x = block(x1,xtok)-x1
+            x = block.attn(block.ln_1(x1),block.ln_1(xtok))
+        x2 = x[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT875A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block875(config,add_mlp=False) for _ in range(1)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        for i,block in enumerate(self.transformer.h_dec2):
+            # x = block(x1,xtok)-x1
+            x = block.attn(block.ln_1(x1),block.ln_1(xtok))
+        x2 = x[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT876A(LGT875A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block875(config,n_head=1, add_mlp=False) for _ in range(1)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT877A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block875(config,add_mlp=False) for _ in range(1)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        pos_emb2 = self.transformer.wpe2(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        for i,block in enumerate(self.transformer.h_dec2):
+            # x = block(x1,xtok)-x1
+            x = block.attn(block.ln_1(x1),block.ln_1(pos_emb2[None].repeat(b,1,1)))
+        x2 = x[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class CausalSelfAttention878(nn.Module):
+
+    def __init__(self, config, n_head=0):
+        super().__init__()
+        if n_head==0:
+            n_head=config.n_head
+        assert config.n_embd % n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd*n_head, bias=config.bias)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd*n_head, config.n_embd, bias=config.bias)
+        # regularization
+
+        # self.dropout = nn.Dropout(config.dropout)
+        # _dclass = _Dropout42B
+        _dclass = nn.Dropout
+
+        self.attn_dropout  = _dclass(config.dropout)
+        self.resid_dropout = _dclass(config.dropout)
+        
+        self.n_head = n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = False
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+
+    def forward(self, x, x0):
+        B, T,  C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        _, T2, _= x0.size()
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, _  = self.c_attn(x).split(self.n_embd* self.n_head, dim=2)
+        _, _, v  = self.c_attn(x0).split(self.n_embd* self.n_head, dim=2)
+        k = k.view(B, T2,  self.n_head, C,).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T,   self.n_head, C,).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T2,  self.n_head, C,).transpose(1, 2) # (B, nh, T, hs)
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        if self.flash:
+            assert 0
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            # manual implementation of attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:,:,:T,:T2] == 0, float('-inf'))
+
+
+            # att = F.softmax(att, dim=-1)
+            att = att.sigmoid()
+            att = self.attn_dropout(att)
+            
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C*self.n_head) # re-assemble all head outputs side by side
+
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
+
+class MLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu    = nn.GELU()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class Block878(nn.Module):
+
+    def __init__(self, config, n_head=0, add_mlp=True):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention878(config, n_head)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.add_mlp = add_mlp
+        if add_mlp:
+            self.mlp = MLP(config)
+
+    def forward(self, x, x0):
+        x = x + self.attn(self.ln_1(x),self.ln_1(x0))
+        if self.add_mlp:
+            x = x + self.mlp(self.ln_2(x))
+        return x
+
+
+class LGT878A(LGT875A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block878(config,add_mlp=False) for _ in range(1)]),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT863B(LGT863A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 2
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT879A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([]),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq= block.ln_f1(x1)
+            xk = block.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+            xv = block.h_v(block.ln_f1(xtok)).reshape(b,t,-1,ne)
+            # x=  
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+            xout = torch.einsum('btpk,bpke->bte',xqk, xv)
+
+            
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT879B(LGT879A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([]),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*1,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*1,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT879C(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([]),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq= block.ln_f1(x1)
+            xk = block.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+            xv = block.h_v(block.ln_f1(xtok)).reshape(b,t,-1,ne)
+            # x=  
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk.masked_fill(xqk<xqk.topk(2,dim=2)[0].min(2)[0].unsqueeze(2),float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+            xout = torch.einsum('btpk,bpke->bte',xqk, xv)
+
+            
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT880A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([Block801(config) for _ in range(config.n_head)]),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            # h_v = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        nh      = self.config.n_head
+        prefix1 = prefix[:,1:nm] 
+
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+            
+
+        vk2 = out = torch.zeros((nh, b, t, ne) ,device=device)
+        # xinput = prefix[:,0:1]+ pos_emb[None,2:3,:]
+        # xinput = torch.cat([xinput,x0[:,lseg:]],1)
+        xinput = xtok
+        h0=torch.zeros((1,b,ne),device=device)
+        for i, block in enumerate(self.transformer.h_dec2):
+            v,_ = block.rnn(xinput,h0)
+            out[i] = v
+            pass
+
+
+        block =self.transformer
+
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq= block.ln_f1(x1)
+            xk = block.h_k(block.ln_f1(x1)).reshape(b,t,nh,ne)
+            xv = (block.ln_f2(vk2)).permute(1,2,0,3)
+            # x=  
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+            xout = torch.einsum('btpk,bpke->bte',xqk, xv)
+
+            
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+
+class LGT881A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([]),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            h_v1 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            h_v2 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            h_v3 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq= block.ln_f1(x1)
+            xk = block.h_k(block.ln_f1(x1)).reshape(b,t,nh,ne)
+            xinput = (xtok)
+            xv = (0        
+                ) + block.h_v1(
+                block.ln_f1(torch.cat([torch.ones_like(xinput[:,:0]),xinput[:,:]],1) )
+                ) + block.h_v2(
+                block.ln_f1(torch.cat([torch.ones_like(xinput[:,:1]),xinput[:,:-1]],1) )
+                ) + block.h_v3(
+                block.ln_f1(torch.cat([torch.ones_like(xinput[:,:2]),xinput[:,:-2]],1) )
+                ) 
+                 
+            xv = xv.reshape(b,t,nh,ne)
+            # x=  
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+            xout = torch.einsum('btpk,bpke->bte',xqk, xv)
+
+            
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT882A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([]),
+            
+            h_dec2 = nn.ModuleList([Block801(config) for _ in range(config.n_head)]),
+
+            h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+
+
+            # h_v1 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            # h_v2 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            # h_v3 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq= block.ln_f1(x1)
+            xk = block.h_k(block.ln_f1(x1)).reshape(b,t,nh,ne)
+
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+
+            xinput = (xtok)
+
+            xinput = torch.stack(
+                [
+                torch.cat([torch.ones_like(xinput[:,:0]),xinput[:,:]],1),
+                torch.cat([torch.ones_like(xinput[:,:1]),xinput[:,:-1]],1),
+                torch.cat([torch.ones_like(xinput[:,:2]),xinput[:,:-2]],1)
+                ],2).reshape(b*t,3,ne)
+            xinput = block.ln_f1(xinput)
+
+            xv = out = torch.zeros((nh, b*t, ne) ,device=device)
+            h0=torch.zeros((1,b*t,ne),device=device)
+            for i, _block in enumerate(self.transformer.h_dec2):
+                v,_ = _block.rnn(xinput,h0)
+                out[i] = v[:,-1]
+                pass
+            xv =  block.ln_f2(xv)            
+
+                 
+            xv = xv.transpose(0,1).reshape(b,t,nh,ne)
+            # x=  
+            xout = torch.einsum('btpk,bpke->bte',xqk, xv)
+
+            
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT883A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([]),
+            
+            h_dec2 = nn.ModuleList([Block801(config) for _ in range(config.n_head)]),
+
+            h_k = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd,bias=True),
+
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(1)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        # for i,block in enumerate(self.transformer.h_enc):
+        #     x= block(x)
+        # x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            # xq= block.ln_f1(x1)
+            # xk =block.h_k(block.ln_f1(x1)).reshape(b,t,nh,ne)
+
+            xinput = (xtok)
+
+            xinput = torch.stack(
+                [
+                torch.cat([torch.ones_like(xinput[:,:0]),xinput[:,:]],1),
+                torch.cat([torch.ones_like(xinput[:,:1]),xinput[:,:-1]],1),
+                torch.cat([torch.ones_like(xinput[:,:2]),xinput[:,:-2]],1)
+                ],2).reshape(b*t,3,ne)
+            xinput = block.ln_f1(xinput)
+
+            xv = out = torch.zeros((nh, b*t, ne) ,device=device)
+            h0=torch.zeros((1,b*t,ne),device=device)
+            for i, _block in enumerate(self.transformer.h_dec2):
+                v,_ = _block.rnn(xinput,h0)
+                out[i] = v[:,-1]
+                pass
+            xv =  block.ln_f2(xv)                             
+            xv = xv.transpose(0,1).reshape(b,t,nh,ne)            
+            xk = block.h_k(xv[:,:,])
+            xq = block.h_v(xv[:,:,0])
+
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+
+
+            # x=  
+            xout = torch.einsum('btpk,bpke->bte',xqk, xv)
+
+            
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT884A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([]),
+            
+            h_dec2 = nn.ModuleList([Block801(config) for _ in range(config.n_head)]),
+
+            h_k = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd,bias=True),
+
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(1)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        # for i,block in enumerate(self.transformer.h_enc):
+        #     x= block(x)
+        # x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            # xq= block.ln_f1(x1)
+            # xk =block.h_k(block.ln_f1(x1)).reshape(b,t,nh,ne)
+
+            xinput = (xtok)
+
+            xinput = torch.stack(
+                [
+                torch.cat([torch.ones_like(xinput[:,:4]),xinput[:,:-4]],1),
+                torch.cat([torch.ones_like(xinput[:,:3]),xinput[:,:-3]],1),
+                torch.cat([torch.ones_like(xinput[:,:2]),xinput[:,:-2]],1),
+                torch.cat([torch.ones_like(xinput[:,:1]),xinput[:,:-1]],1),
+                torch.cat([torch.ones_like(xinput[:,:0]),xinput[:,:]],1),
+                ],2).reshape(b*t,-1,ne)
+            xinput = block.ln_f1(xinput)
+
+            xv = out = torch.zeros((nh, b*t, ne) ,device=device)
+            h0=torch.zeros((1,b*t,ne),device=device)
+            for i, _block in enumerate(self.transformer.h_dec2):
+                v,_ = _block.rnn(xinput,h0)
+                out[i] = v[:,-1]
+                pass
+            xv =  block.ln_f2(xv)                             
+            xv = xv.transpose(0,1).reshape(b,t,nh,ne)            
+            xk = block.h_k(xv[:,:,])
+            xq = block.h_v(xv[:,:,0])
+
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+
+
+            # x=  
+            xout = torch.einsum('btpk,bpke->bte',xqk, xv)
+
+            
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT885A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(dict(
+                h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+                h_v = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+                ))
+                for _ in range(config.n_layer//8)
+            ]),
+            
+
+            h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq = block.ln_f1(x1)
+            xx = (xtok)
+            for ii,blockk in enumerate(self.transformer.h_dec2):
+                # for _block
+                xk = blockk.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+                xv = blockk.h_v(block.ln_f1(xx)).reshape(b,t,-1,ne)
+                xv = xv*xv.sigmoid()
+                # x=  
+                xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+                xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+                xqk = xqk / ne**0.5
+                xqk = xqk.softmax(2)
+                xqk = block.drop(xqk)
+                # xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+                xx = xx + block.drop(torch.einsum('btpk,bpke->bte',xqk, xv))
+                
+            xout = xx
+        xout = block.h_final(xout)
+            
+        self.print_once((xqk*100*t).mean((0,1,2)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+class LGT885B(LGT885A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+        nkk =1 
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(dict(
+                h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                ))
+                for _ in range(config.n_layer//8)
+            ]),
+            
+
+            h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT886A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(dict(
+                h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                ))
+                for _ in range(config.n_layer//8)
+            ]),
+            
+
+            h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq = block.ln_f1(x1)
+            xx = torch.zeros_like(xtok)
+            xinput = xtok
+            for ii,blockk in enumerate(self.transformer.h_dec2):
+                # for _block
+                xk = blockk.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+                xv = blockk.h_v(block.ln_f1(xinput)).reshape(b,t,-1,ne)
+                xv = xv*xv.sigmoid()
+                # x=  
+                xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+                xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+                xqk = xqk / ne**0.5
+                xqk = xqk.softmax(2)
+                xqk = block.drop(xqk)
+                # xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+                xx = xx + block.drop(torch.einsum('btpk,bpke->bte',xqk, xv))
+                xinput = xx
+            xout = xx
+        xout = block.h_final(xout)
+            
+        self.print_once((xqk*100*t).mean((0,1,2)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT886C(LGT886A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(dict(
+                h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                ))
+                for _ in range(1)
+            ]),
+            
+
+            h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT887A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(dict(
+                h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                ))
+                for _ in range(config.n_layer//8)
+            ]),
+            h_kout = nn.Linear(config.n_embd, config.n_embd*config.n_layer//8,bias=True),
+            
+
+            h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq = block.ln_f1(x1)
+            nkk = len(self.transformer.h_dec2)
+            xx = torch.zeros_like(xtok)[None].repeat(nkk,1,1,1)
+            xinput = xtok
+            for ii,blockk in enumerate(self.transformer.h_dec2):
+                # for _block
+                xk = blockk.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+                xv = blockk.h_v(block.ln_f1(xinput)).reshape(b,t,-1,ne)
+                xv = xv*xv.sigmoid()
+                # x=  
+                xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+                xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+                xqk = xqk / ne**0.5
+                xqk = xqk.softmax(2)
+                xqk = block.drop(xqk)
+                # xqk = xqk.reshape(b,t,-1).softmax(-1).reshape(xqk.shape)
+                xx[ii] =  block.h_final(block.drop(torch.einsum('btpk,bpke->bte',xqk, xv)))
+            # xout = xx
+
+        xk = self.transformer.h_kout(block.ln_f1(x1)).reshape(b,t,-1,ne)
+        xqk = torch.einsum('btke,bte->btk',xk,xq)
+        xqk = xqk / ne**0.5
+        xqk = xqk.softmax(2)
+
+        xout = torch.einsum('btk,kbte->bte',xqk, xx)            
+        # xout = block.h_final(xout)
+            
+        self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT887B(LGT887A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(dict(
+                h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                ))
+                for _ in range(config.n_layer//2)
+            ]),
+            h_kout = nn.Linear(config.n_embd, config.n_embd*config.n_layer//2,bias=True),
+            
+
+            h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+class LGT888A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([
+            #     nn.ModuleDict(dict(
+            #     h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     ))
+            #     for _ in range(config.n_layer//8)
+            # ]),
+            # h_kout = nn.Linear(config.n_embd, config.n_embd*config.n_layer//8,bias=True),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+
+            # h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq = block.ln_f1(x1)
+
+
+
+        xk = self.transformer.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+        xv = self.transformer.h_v(block.ln_f1(x1)).reshape(b,t,-1,ne)
+        xqk = torch.einsum('btke,bte->btk',xk,xq)
+        xqk = xqk / ne**0.5
+        xqk = xqk.softmax(2)
+
+        xout = torch.einsum('btk,btke->bte',xqk, xv)            
+        # xout = block.h_final(xout)
+            
+        self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT889A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([]),
+            
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(dict(
+
+                    h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+                    h_kout = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+                    ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+                    ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+                    rnns = nn.ModuleList([Block801(config) for _ in range(config.n_head)]),
+
+                )
+                ) for _ in range(config.n_layer)])
+                ,
+
+
+
+            # h_v1 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            # h_v2 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            # h_v3 = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(1)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+
+        xinput = (xtok)
+        xinput = torch.stack(
+            [
+            torch.cat([torch.ones_like(xinput[:,:2]),xinput[:,:-2]],1),
+            torch.cat([torch.ones_like(xinput[:,:1]),xinput[:,:-1]],1),
+            torch.cat([torch.ones_like(xinput[:,:0]),xinput[:,:]],1),
+            ],2).reshape(b*t,3,ne)
+        for i,block in enumerate(self.transformer.h_dec2):
+            # x = block(x1,xtok)-x1
+
+
+            xinput = block.ln_f1(xinput)
+
+            xv = out = torch.zeros((nh, b*t, ne) ,device=device)
+            h0=torch.zeros((1,b*t,ne),device=device)
+            for ii, _block in enumerate(block.rnns):
+                v,_ = _block.rnn(xinput,h0)
+                out[ii] = v[:,-1]
+                pass
+            xv =  block.ln_f2(xv)            
+
+                 
+            xv = xv.transpose(0,1).reshape(b,t,nh,ne)
+
+
+            xq = block.ln_f1(x1)
+            xk = block.h_kout(block.ln_f1(x1)).reshape(b,t,nh,ne)
+            xqk = torch.einsum('btke,bte->btk',xk,xq)
+            # xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.softmax(2)
+            xout = torch.einsum('btk,btke->bte',xqk, xv)
+            x1 = xout
+            
+
+
+            xq = block.ln_f1(xout)
+            xk = block.h_k(block.ln_f1(xout)).reshape(b,t,nh,ne)
+            xqk = torch.einsum('bpke,bte->btpk',xk,xq)
+            xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.softmax(2)
+            xv = block.ln_f1(xout)
+            xinput = torch.einsum('btpk,bpe->btke',xqk, xv).reshape(b*t,-1,ne)
+            # xinput = torch.cat([xinput,xv],1)
+                        
+        self.print_once((xqk*100).mean((0,1)).sum(0).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+class LGT892A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([
+            #     nn.ModuleDict(dict(
+            #     h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     ))
+            #     for _ in range(config.n_layer//8)
+            # ]),
+            # h_kout = nn.Linear(config.n_embd, config.n_embd*config.n_layer//8,bias=True),
+            
+            rnns = nn.ModuleList([Block801(config) for _ in range(config.n_head)]),
+            h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+
+            # h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+            
+        xinput = (xtok)
+        xinput = torch.stack(
+            [
+            torch.cat([torch.ones_like(xinput[:,:3]),xinput[:,:-3]],1),
+            torch.cat([torch.ones_like(xinput[:,:2]),xinput[:,:-2]],1),
+            torch.cat([torch.ones_like(xinput[:,:1]),xinput[:,:-1]],1),
+            torch.cat([torch.ones_like(xinput[:,:0]),xinput[:,:]],1),
+            ],2).reshape(b*t,-1,ne)
+
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        block =self.transformer
+        for i,block in enumerate([block]):
+            xinput = block.ln_f1(xinput)
+
+            xv = out = torch.zeros((nh, b*t, ne) ,device=device)
+            h0=torch.zeros((1,b*t,ne),device=device)
+            for ii, _block in enumerate(block.rnns):
+                v,_ = _block.rnn(xinput,h0)
+                out[ii] = v[:,-1]
+                pass
+            xv =  block.ln_f2(xv).transpose(0,1).reshape(b,t,nh,ne)
+
+
+        xq = block.ln_f1(x1)
+        xk = self.transformer.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+        # xv = self.transformer.h_v(block.ln_f1(x1)).reshape(b,t,-1,ne)
+        xqk = torch.einsum('btke,bte->btk',xk, xq)
+        xqk = xqk / ne**0.5
+        xqk = xqk.softmax(2)
+
+        xout = torch.einsum('btk,btke->bte',xqk, xv)            
+        # xout = block.h_final(xout)
+            
+        self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT893A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([
+            #     nn.ModuleDict(dict(
+            #     h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     ))
+            #     for _ in range(config.n_layer//8)
+            # ]),
+            # h_kout = nn.Linear(config.n_embd, config.n_embd*config.n_layer//8,bias=True),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+
+            # h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+            # x = block(x1,xtok)-x1
+            xq = block.ln_f1(x1)
+
+
+
+        xk = self.transformer.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+        xv = self.transformer.h_v(block.ln_f1(xtok)).reshape(b,t,-1,ne)
+        xqk = torch.einsum('btke,bte->btk',xk,xq)
+        xqk = xqk / ne**0.5
+        xqk = xqk.softmax(2)
+
+        xout = torch.einsum('btk,btke->bte',xqk, xv)            
+        # xout = block.h_final(xout)
+            
+        self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+class LGT893B(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+        nkk = 1
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([
+            #     nn.ModuleDict(dict(
+            #     h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            #     ))
+            #     for _ in range(config.n_layer//8)
+            # ]),
+            # h_kout = nn.Linear(config.n_embd, config.n_embd*config.n_layer//8,bias=True),
+            
+            h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+
+            # h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        # x = torch.cat([
+        #     xtok[:,:lseg],
+        #     xtok[:,lseg:],
+        # ],1)
+
+
+        # for i,block in enumerate(self.transformer.h_enc):
+        #     x= block(x)
+        # x1 = x
+
+        block =self.transformer
+            
+        # # if 1:
+        nh = self.config.n_head
+        # xt = torch.arange(0,t,device=device)
+        # for i,block in enumerate([block]):
+        #     # x = block(x1,xtok)-x1
+        #     xq = block.ln_f1(x1)
+
+
+
+        # xk = self.transformer.h_k(block.ln_f1(x1)).reshape(b,t,-1,ne)
+        # xv = self.transformer.h_v(block.ln_f1(xtok)).reshape(b,t,-1,ne)
+        # xqk = torch.einsum('btke,bte->btk',xk,xq)
+        # xqk = xqk / ne**0.5
+        # xqk = xqk.softmax(2)
+
+        # xout = torch.einsum('btk,btke->bte',xqk, xv)   
+
+
+        xout = self.transformer.h_v(block.ln_f1(xtok)).reshape(b,t,ne)
+
+        # xout = block.h_final(xout)
+            
+        # self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+class LGT894A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+        nkk = config.n_head
+
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([]),
+            
+
+            h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        # for i,block in enumerate(self.transformer.h_enc):
+        #     x= block(x)
+        # x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+ 
+            xinput = (xtok)
+            xv =  (block.h_v( block.ln_f1(xinput)))
+            xv =  xv.reshape(b,t,nh,ne)            
+            xv =  block.ln_f2(xv)                             
+
+            xq = block.ln_f1(prefix1[:,0:1])
+            xk = block.h_k(xq).reshape(b,1,nh,ne)    
+
+            xqk = torch.einsum('btke,bte->btk',xk,xq)
+            # xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            xqk = xqk / ne**0.5
+            xqk = xqk.softmax(-1)
+            
+
+            xout = torch.einsum('btk,btke->bte',xqk.repeat(1,t,1), xv)
+
+            
+        # self.print_once(xqk.shape)
+        self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT895A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+        nkk = config.n_head
+
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            # h_dec2 = nn.ModuleList([]),
+            
+
+            h_k1 = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_k2 = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v1 = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v2 = nn.Linear(config.n_embd*nkk, config.n_embd,bias=True),
+
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        # for i,block in enumerate(self.transformer.h_enc):
+        #     x= block(x)
+        # x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        for i,block in enumerate([block]):
+ 
+            xinput = (xtok)
+            xv =  (block.h_v1( block.ln_f1(xinput)))
+            xv =  xv.reshape(b,t,nh*ne)            
+            # xv =  block.ln_f2(xv)                             
+
+            xq = block.ln_f1(prefix1[:,0:1])
+            xk = block.h_k1(xq).reshape(b,1,nh*ne)    
+            xk2 = block.h_k2(xq).reshape(b,1,nh*ne)    
+
+            xqk = torch.einsum('btk,btk->btk',xk,xk2)
+            # xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            # xqk = xqk 
+            xqk = xqk.sigmoid()
+            
+
+            xv2 = torch.einsum('btk,btk->btk',xqk.repeat(1,t,1), xv*xv.sigmoid())
+            
+            xout = block.h_v2(xv2)
+
+        # self.print_once(xqk.shape)
+        # self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT896A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+        nkk = config.n_head
+
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_dec2 = nn.ModuleList([
+                nn.ModuleDict(
+                    dict(
+                        h_k1 = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                        h_k2 = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                        h_v1 = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+                        h_v2 = nn.Linear(config.n_embd*nkk, config.n_embd,bias=True),
+                        ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+                        ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+
+                    )
+                ) for _ in range(config.n_layer//8)
+
+            ]),
+            
+
+
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        # for i,block in enumerate(self.transformer.h_enc):
+        #     x= block(x)
+        # x1 = x
+
+        block =self.transformer
+            
+        # if 1:
+        nh = self.config.n_head
+        xt = torch.arange(0,t,device=device)
+        xinput = (xtok)
+        for i,block in enumerate(self.transformer.h_dec2):
+        # for i,block in enumerate([block]):
+ 
+            xv =  (block.h_v1( block.ln_f1(xinput)))
+            xv =  xv.reshape(b,t,nh*ne)            
+            # xv =  block.ln_f2(xv)                             
+
+            xq = block.ln_f1(prefix1[:,0+i:1+i])
+            xk = block.h_k1(xq).reshape(b,1,nh*ne)    
+            xk2 = block.h_k2(xq).reshape(b,1,nh*ne)    
+
+            xqk = torch.einsum('btk,btk->btk',xk,xk2)
+            # xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+            # xqk = xqk 
+            xqk = xqk.sigmoid()
+            
+
+            xv2 = torch.einsum('btk,btk->btk',xqk.repeat(1,t,1), xv*xv.sigmoid())
+            
+            xinput = xinput + block.h_v2(xv2)
+
+        # self.print_once(xqk.shape)
+        # self.print_once((xqk*100).mean((0,1)).long().cpu().numpy())
+        x2 = xinput[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT890A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+ 
+            h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+
+            # h_final = nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+        xout = x1
+
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+class LGT891A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        nkk = config.n_head
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+ 
+            # h_k = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+            # h_v = nn.Linear(config.n_embd, config.n_embd*nkk,bias=True),
+
+            h_final = MLP(config),
+            # nn.Linear(config.n_embd, config.n_embd,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+
+        for i,block in enumerate(self.transformer.h_enc):
+            x= block(x)
+        x1 = x
+
+        xout = xtok + self.transformer.h_final(x1)
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT863C(LGT863A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+
+class LGT863D(LGT863A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+    scale_gate= 5.0
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+
+class LGT863E(LGT863A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+    scale_gate= 5.0
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer+5)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 1
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT865A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 0.1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 4
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        xtok = tok_emb
+        
+        xg = torch.einsum('btke,bte->btk',self.transformer.h_gate(xtok[:,lseg:]).reshape(b,lseg,nk,ne), prefix1[:,0:1])
+        xg = xg*self.scale_gate
+        xg = xg.log_softmax(-1)
+        xv = self.transformer.h_f1(prefix1[:,1:2]) + self.transformer.h_f2(xtok[:,lseg:])
+        xv = xv.reshape(b,lseg,nk,ne)
+
+
+        self.print_once((xg.exp()*100).mean((0,1)).long().cpu().numpy())
+
+        #### disabling the auxiliary
+        # x = x2
+
+        # xout = (1-mask)*self.transformer.ln_f(x) + mask*
+        xout = self.transformer.ln_f(xv)
+        
+        lprior = xg
+
+
+        lprior = torch.cat([xg,xg],1)
+        x = torch.cat([xout, xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+            lprior = lprior[:,sel]
+
+        # print(x.shape,lprior.shape)
+        logits = (self.lm_head(x).log_softmax(-1) + lprior.unsqueeze(-1) ).logsumexp(2)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+
+class LGT865B(LGT865A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 0.1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 1
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+class LGT864A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = config.n_head
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=11,)]),
+            h_f1 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_f2 = nn.Linear(config.n_embd,  nk*config.n_embd, bias=False),
+            h_gate = nn.Linear(config.n_embd, nk*config.n_embd, bias=True),
+            h_mlp = MLP(config),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        xtok = tok_emb
+        
+        xg = torch.einsum('btke,bte->btk',self.transformer.h_gate(xtok[:,lseg:]).reshape(b,lseg,nk,ne), prefix1[:,0:1])
+        xg = xg*self.scale_gate/ne**0.5
+        xg = xg.softmax(-1)
+        xg = self.transformer.drop(xg)
+        xv = self.transformer.h_f1(prefix1[:,1:2]) + self.transformer.h_f2(xtok[:,lseg:])
+        xv = xv.reshape(b,lseg,nk,ne)
+        x2 = xtok[:,lseg:] + self.transformer.drop(torch.einsum('btk,btke->bte',xg,xv))
+
+        x2 = x2 + self.transformer.drop(self.transformer.h_mlp(self.transformer.ln_f2(x2)))
+        # .matmul(prefix1[:,0:1].transpose(1,2))[:,:,0:1].sigmoid()
+        self.print_once((xg*100).mean((0,1)).long().cpu().numpy())
+
+        #### disabling the auxiliary
+        # x = x2
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+        
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class Block858(nn.Module):
+
+    def __init__(self, config, hidden_dim,is_causal=True, is_attn=1, bias=None, use_mlp =True):
+        super().__init__()
+        self.nk = nk = config.nm_a
+        self.lrank = lrank  =config.lrank
+        
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        # self.lin = nn.Linear(config.n_embd, config.block_size//2 * config.nk * hidden_dimconfig.n_embd, bias=True)
+        self.lin_in = nn.Linear(config.n_embd, config.nk * hidden_dim, bias=True)
+        self.lin_out = nn.Linear(hidden_dim, config.nk * config.n_embd, bias=True)
+        self.lin_in2 = nn.Linear(config.n_embd, config.nk * hidden_dim, bias=True)
+        self.lin_out2 = nn.Linear(hidden_dim, config.nk * config.n_embd, bias=True)
+
+        self.lin_k = nn.Linear(config.n_embd, config.nk, bias=True)
+        # self.attn = CausalSelfAttention717(config, lora_vim, is_causal, bias)
+
+        self.dropout = nn.Dropout(config.dropout)
+        # self.is_attn=is_attn
+        # self.n_embd =  config.n_embd
+        # self.use_mlp=use_mlp
+
+
+
+    def forward(self, x, x0, vlora=None, vlora_att = None, attn_x = None, mlp_x= None,
+        mlp_mask=None,
+        return_dict=False,
+        return_mlp=False, 
+        return_gates=False):
+        pass
+        # ctx = self.attn(self.ln_1(x),self.ln_1(x0),)
+
+
+
+class LGT858A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block858(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix1[:,0:1]
+
+
+        vk = block.lin_in(x0[:,lseg:]).reshape(b,t//2,nk,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('btkf,kfe->btke',vk, block.lin_out.weight.reshape( nk,  -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,1,nk,ne)
+
+        vk = block.lin_in2( x0[:,lseg-1:-1]).reshape(b,t//2,nk,-1) 
+        vk = vk*vk.sigmoid()
+        vk = torch.einsum('btkf,kfe->btke',vk, block.lin_out2.weight.reshape( nk,  -1, ne))
+        vk2 = vk2 + vk
+
+
+        xmix = xinput[:,:1] 
+        xmix = self.transformer.ln_f2(xmix)
+        xmix = 0.1*xmix
+        xp = block.lin_k(xmix).reshape(b,nk)
+        xp = xp*xp.sigmoid()
+
+        # xp = xp.masked_fill(xp<xp.topk(3,dim=-1)[0].min(-1)[0].unsqueeze(-1),float('-inf'))
+        # xp = 0.5*xp.softmax(-1)+0.5*1/self.nk
+        # xp = xp.sigmoid()
+        # xp = 0.01*xp
+
+        # xp = xp.softmax(-1)
+        
+        x2 = torch.einsum('bk,btke->bte', xp, vk2)
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT855A2(LGT855A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num<-10
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT857A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f4 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix1[:,0:1]
+
+        vk = block.lin_in(tok_emb[:,lseg:]).reshape(b,t//2,nk,-1)
+        vk = vk*vk.sigmoid()
+        vk2 = torch.einsum('btkf,kfe->btke',vk, block.lin_out.weight.reshape( nk,  -1, ne))
+        vk2 = vk2 + block.lin_out.bias.reshape(1,1,nk,ne)
+
+        xmix = xinput[:,:1] 
+        xmix = self.transformer.ln_f2(xmix)
+        xmix = 0.1*xmix
+        xp = block.lin_k(xmix).reshape(b,nk)
+        xp = xp*xp.sigmoid()
+
+        
+        x2 = torch.einsum('bk,btke->bte', xp, vk2)
+        x2 = tok_emb[:,lseg:] + x2
+
+        xout = (1-mask)*self.transformer.ln_f(x) + mask*self.transformer.ln_f(x2)
+
+        self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT855C(LGT855A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        self.nk = config.nk = nk = 2
+        # self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT856A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            # h_dec2 = nn.ModuleList([Block853(config, hidden_dim=10,)]),
+            h_dec2 = nn.ModuleList([Block(config,add_mlp=False) ]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+        x = torch.cat([
+            prefix[:,0:1]*(1-mask) + pos_emb[None,1:2], 
+            x[:,lseg:],
+        ],1)
+
+        vmsq = 0
+        for i,block in enumerate(blocks):
+            x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+            vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        #### this is the prediction from transformer model
+        x1 = x[:,1:]
+
+        block = self.transformer.h_dec2[0]
+        xinput = prefix1[:,0:1]
+        x = torch.cat([
+            prefix1[:,0:1], 
+            tok_emb[:,lseg:],
+        ],1)
+        x2 = block(x)
+        x2 = x2[:,1:]
+
+        xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+
+        # self.print_once((xp*100).mean(0).long().cpu().numpy())
+
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+        # x = self.transformer.ln_f(x)
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+
+class LGT855D(LGT855A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+        
+        v_hidden = 20
+        self.nk = config.nk = nk = 50
+        # self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=v_hidden,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT855E(LGT855A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+        
+        v_hidden = 20
+        self.nk = config.nk = nk = 150
+        # self.nk = config.nk = nk = 40
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)]),
+            h_dec2 = nn.ModuleList([Block853(config, hidden_dim=v_hidden,)]),
+
+            h_enc = nn.ModuleList([Block(config) for _ in range(config.n_layer//4)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+class LGT900A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        from ccm.modeling_rwkv import RWKV, RWKVConfig
+        self.conf2 = conf2 = RWKVConfig()
+        for k,v in config.asdict().items():
+            setattr(conf2,k,v)
+        rnn = RWKV(conf2)
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            h_dec2 = nn.ModuleList([]),
+            rnn = rnn, 
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(1)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+        config = self.conf2
+        rwkv = self.transformer.rnn.rwkv
+        state=None
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # x = rwkv.wte(idx)
+
+        x = rwkv.ln_p(x)
+        # x = self.rwkv.drop(x)
+        for block_idx,block in enumerate(rwkv.h):
+            x, state = block(x,state)
+            if state is not None: ## in generation mode
+                if (
+                    config.rescale_every > 0 
+                    and (block_idx + 1) % self.config.rescale_every == 0
+                ):
+                    x = x/2
+        # x = rwkv.ln_f(x)
+
+        xout = x
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+
+class LGT901A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        from ccm.modeling_rwkv import RWKV, RWKVConfig
+        self.conf2 = conf2 = RWKVConfig()
+        for k,v in config.asdict().items():
+            setattr(conf2,k,v)
+        rnn = RWKV(conf2)
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            h_dec2 = nn.ModuleList([]),
+            rnn = rnn, 
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(1)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+        config = self.conf2
+        rwkv = self.transformer.rnn.rwkv
+        state=None
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # x = rwkv.wte(idx)
+
+        x = rwkv.ln_p(x)
+        # x = self.rwkv.drop(x)
+        for block_idx,block in enumerate(rwkv.h):
+            x, state = block(x,state)
+            if state is not None: ## in generation mode
+                if (
+                    config.rescale_every > 0 
+                    and (block_idx + 1) % self.config.rescale_every == 0
+                ):
+                    x = x/2
+        # x = rwkv.ln_f(x)
+
+        block = self.transformer.h_enc[0]
+        x = x + block.attn(block.ln_1(x))
+
+        xout = x
+        
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
+
+
+
+class LGT902A(LGT850A):
+
+    '''
+    same as LGT740F but using template matching to decode hidden state 
+    '''
+    logsigma = math.log(0.5)
+    lpe_scale= 0.025
+    encoder_lpe_scale = 0.
+    # is_random_encoding=0
+    # is_random_encoding=1 ### 6000 steps of random, then non-random
+    # is_random_encoding=0
+
+    is_shuffle_mlp = 0
+    # is_shuffle_mlp = 1
+    is_shuffle_prefix = 0
+    # is_shuffle_prefix = 1
+    # is_shuffle_prefix = 1
+    scale_gate = 1.0
+
+    is_change_encoder = 0
+    # is_change_encoder = 1
+
+    @property
+    def is_random_encoding(self):
+        ### enable gradient mixing when early training
+        # return self.iter_num<10000
+        ### always enable gradient mixing to make sure generalisation
+        return self.iter_num>0
+        # 10000
+
+    def __init__(self, config):
+        super(GPT,self).__init__()
+
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        config = copy.copy(config)
+        self.config = config
+
+        vmax = config.vocab_size+500+10
+        # nm = 10
+        self.vmax = vmax
+        # self.nm = config.nm = nm = 4
+        self.nm = config.nm = nm = (config.n_layer//2+1)*2
+        self.ns = 3
+
+        # self.nk = config.nk = nk = 2
+        self.nk = config.nk = nk = 8
+        self.nm_a = config.nm_a = nm_a = config.n_embd ### R2
+        # self.nk = nk = 1
+        self.nlow = nlow = 16
+        self.extra_loss = math.log(nk)
+        config.lrank = 1
+        #  + (nsub)*math.log(10.)
+
+        # self.extra_loss = (math.lgamma(256+1) - math.lgamma(240+1) - math.lgamma(16+1)) + (nsub)*math.log(10.)
+
+        self.low  = config.low  = low  = -3.0
+        self.high = config.high = high =  3.0
+        # self.nsep = config.nsep = 5
+        self.nsep = config.nsep = nsep = 600
+        self.sep = (self.high -self.low)/self.nsep
+        # self.sep = 0.05
+        lseg = config.block_size//2
+        self.lseg = lseg = lseg
+        self.nseg = config.block_size//self.lseg
+        nseg = config.block_size//lseg
+
+        from ccm.modeling_rwkv import RWKV, RWKVConfig
+        self.conf2 = conf2 = RWKVConfig()
+        for k,v in config.asdict().items():
+            setattr(conf2,k,v)
+        # rnn = RWKV(conf2)
+
+        # h_enc  = nn.ModuleList([Block235(config, is_attn=1) for _ in range(config.n_layer//2)] )
+
+        # h_dec = nn.ModuleList([Block740(config, lora_vim = config.n_embd, is_attn=1) for _ in range(config.n_layer//2)])
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(vmax, config.n_embd),
+            wpe = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+            wpe2 = nn.Embedding(config.block_size+nm*nseg, config.n_embd),
+
+            drop = nn.Dropout(config.dropout),
+            h_dec = nn.ModuleList([]),
+            h_dec2 = nn.ModuleList([
+                RWKV(conf2).rwkv.h for _ in range(config.n_head)
+            ]),
+            # rwkv_h = RWKV(conf2).rwkv.h, 
+
+            h_k = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            h_v = nn.Linear(config.n_embd, config.n_embd*config.n_head,bias=True),
+            
+            h_enc = nn.ModuleList([Block(config) for _ in range(0)]),
+            
+            ln_f  = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f1 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f2 = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f3 = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+        # self.transformer.comp_in.weight = nn.Parameter(torch.eye(config.n_embd)[:nm_a],requires_grad=False)
+        # self.transformer.comp_out.weight = nn.Parameter(torch.eye(config.n_embd)[:,:nm_a],requires_grad=False)
+        # self.encoder = nn.Linear(config.block_size*config.n_embd, nm_a, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, vmax, bias=False)
+        # self.kreg = KAutoReg637(nk, self.config.n_embd, nlow)
+
+        ### precision of the gaussian distrib
+        self.norm_w = nn.Parameter(torch.tensor(0.))
+        # self.norm_b = nn.Parameter(torch.tensor(0.))
+
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+
+
+
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        # print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        self.reset = True
+
+
+        # self.prior_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        # self.post_logsigma = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.logsigma = math.log(0.5)
+
+        self._disabled=0
+        # self._disabled=1
+        self._disabled=2
+
+
+
+    def decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1,):
+        # logits, lpy = self._decode_with_prefix(self.transformer.h_dec, prefix, idx, targets, sel=None,sum=0)
+        return self._decode_with_prefix(blocks, prefix[:,:], idx, targets, sel=sel, sum=sum)
+
+    def _decode_with_prefix(self, blocks, prefix, idx, targets, sel=None, sum=1, mlp_mask=None):
+        if mlp_mask is None:
+            mlp_mask = [None] * len(self.transformer.h_dec)
+
+
+        device = idx.device
+        b, t   = idx.size()[:2]
+        ns     = 1
+        nm     = self.nm
+        nm_a   = self.nm_a
+        #### decoding the sequence based on the prefix
+        nk      = self.nk
+        ne = self.config.n_embd
+
+        nm      = self.nm//2
+        prefix1 = prefix[:,1:nm] 
+
+
+        _disabled = self.is_shuffle_mlp
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix1 for mlp controlling!!!!!!!!------------')
+            ### quality checking the noise
+            prefix1 = prefix1.flip((0,))
+            # self.print_once(prefix1.abs().mean(0).mean().item())
+            # prefix1 = 0*prefix1 + prefix1.mean(dim=0,keepdims=True)
+            # prefix1 = prefix1.flip((2,))
+
+        _disabled = self.is_shuffle_prefix
+        # _disabled = 1
+        if _disabled==1:
+            self.print_once('[DEBUG]Disabling the prefix0 for context control!!!!!!!------------')
+            ### quality checking the noise
+            prefix = prefix.flip((0,))            
+
+
+        ### concating the ending segment to the left of decoder
+        pos = torch.arange(0, t, dtype=torch.long, device=device) + 0 # shape (t)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+        ### dont add positional info to latent
+        x = tok_emb + pos_emb
+        x0 = x
+
+        # self.print_once(prefix.shape)
+        nseg = self.nseg
+        lseg = self.lseg
+        nm   = self.nm//2
+
+        ### if the length of the segment is shorter than the required lenght
+        mask = torch.ones_like(x[:,:1,:1])
+        if self.training and self.is_random_encoding:
+            mask = (torch.rand_like(x[:,:1,:1]) > 0.5).float()
+        else:
+            ### when mask=1, the input is disabled, and the encoder is forced to predict a compressed rep
+            ### this gradient seems very useful for initialising the encoder
+            ###
+            ### mask=1 using flat context
+            ### mask=0 use compressed context
+            mask = torch.ones_like(x[:,:1,:1])
+            # mask = torch.rand_like(x[:,:1,:1])>-0.5
+
+
+
+        vmsq = torch.zeros_like(x[:,0,0])
+        # for i,block in enumerate(blocks):
+        #     x,vmsqd = block(x,x, vlora=prefix1[:,i:i+1], vlora_att=prefix1[:,i:i+1], return_gates=True, mlp_mask = mlp_mask[i])
+        #     vmsq = vmsq + 4./len(blocks)*vmsqd.mean(-1)
+        # self.print_once(f'-----------average decoder density {vmsq.mean().item()/4:.4f}')
+
+        # #### this is the prediction from transformer model
+        # x1 = x[:,1:]
+
+
+        xtok = tok_emb
+        x = torch.cat([
+            xtok[:,:lseg],
+            xtok[:,lseg:],
+        ],1)
+
+        
+
+        config = self.conf2
+        # rwkv_h = self.transformer.rnn.rwkv_h
+        state=None
+
+        # device = idx.device
+        # b, t = idx.size()
+        # assert t <= config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # x = rwkv.wte(idx)
+
+        # x = rwkv.ln_p(x)
+        x = self.transformer.ln_f(x)
+        # x = self.rwkv.drop(x)
+        nh = config.n_head
+        xinput = x
+
+        xv = out = torch.zeros((nh, b, t, ne) ,device=device)
+        # h0=torch.zeros((1,b,t,ne),device=device)
+        for i, _block in enumerate(self.transformer.h_dec2):
+
+            x = xinput
+            for block_idx,block in enumerate(_block):
+                x, state = block(x,state)
+                if state is not None: ## in generation mode
+                    if (
+                        config.rescale_every > 0 
+                        and (block_idx + 1) % self.config.rescale_every == 0
+                    ):
+                        x = x/2
+
+            out[i] = x[:,:]            
+            pass
+
+        block = self.transformer
+        xv = block.ln_f2(xv)         
+        xq = block.ln_f3(xv[0,:,t//2:t//2+1])
+        xk = block.h_k(xq).reshape(b,1,nh,ne)    
+
+        xv = xv[1:]
+        # .transpose(0,2)
+
+
+
+        xqk = torch.einsum('btke,bte->btk',xk,xq)[:,:,1:]
+        # xqk = xqk.masked_fill(xt[None,:,None,None]<xt[None,None,:,None],float('-inf'))
+        xqk = xqk / ne**0.5
+        xqk = xqk.softmax(-1)
+        
+        xout = torch.einsum('btk,kbte->bte',xqk.repeat(1,t,1), xv)
+
+
+        
+        x2 = xout[:,lseg:]
+
+        #### disabling the auxiliary
+
+        # xout = (1-mask)*self.transformer.ln_f(x1) + mask*self.transformer.ln_f(x2)
+        xout = self.transformer.ln_f(x2)
+
+        x = torch.cat([x0[:,:lseg,:], xout],1)
+
+
+        if sel is not None:
+            x = x[:,sel]
+            targets = targets[:,sel]
+
+
+        logits = self.lm_head(x)
+        lpy = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1,reduction='none')
+            lpy = -loss.reshape((b,1,-1))
+            if sum==1:
+                lpy = lpy.sum(-1)        
+        return logits,lpy,vmsq
